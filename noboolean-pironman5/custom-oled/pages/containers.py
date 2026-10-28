@@ -42,7 +42,18 @@ def _short_name(c):
     if proj and svc:
         return proj if svc in ("app", "web", "server") and len(proj) <= 14 else f"{proj}/{svc}"
     names = c.get("Names") or []
-    return names[0].lstrip("/") if names else c.get("Id", "")[:8]
+    if not names:
+        return c.get("Id", "")[:8]
+    n = names[0].lstrip("/")
+    parts = n.split("_")
+    if len(parts) >= 2 and parts[-1].isdigit():
+        parts = parts[:-1]
+    if len(parts) == 2 and parts[1] in ("app", "web", "server"):
+        parts = parts[:1]
+    n = parts[0] + ("/" + "_".join(parts[1:]) if len(parts) > 1 else "")
+    if n.split("-", 1)[0] in ("noboolean", "sunfounder") and "-" in n:
+        n = n.split("-", 1)[1]
+    return n
 
 
 class _Sampler:
