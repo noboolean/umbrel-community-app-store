@@ -16,3 +16,7 @@ services:
       - /:/host:ro
       - /proc:/proc:ro
       - /sys:/sys:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # custom OLED pages (containers page etc.) and the fixed dashboard build ship in this app folder
+      - ${APP_DATA_DIR}/custom-oled/pages:/opt/pironman5/venv/lib/python3.12/site-packages/pm_auto/addons/oled/pages:ro
+      - ${APP_DATA_DIR}/custom-www:/opt/pironman5/venv/lib/python3.12/site-packages/pm_dashboard/www:ro

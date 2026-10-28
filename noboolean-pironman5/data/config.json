@@ -1,0 +1,28 @@
+{
+    "system": {
+        "data_interval": 1,
+        "database_retention_days": 30,
+        "debug_level": "INFO",
+        "enable_history": true,
+        "gpio_fan_mode": 0,
+        "gpio_fan_pin": 6,
+        "oled_enable": true,
+        "oled_pages": [
+            "mix",
+            "performance",
+            "ips",
+            "disk",
+            "containers"
+        ],
+        "oled_rotation": 0,
+        "oled_sleep_timeout": 0,
+        "rgb_brightness": 100,
+        "rgb_color": "#0a1aff",
+        "rgb_enable": true,
+        "rgb_led_count": 4,
+        "rgb_led_count_min": 4,
+        "rgb_speed": 50,
+        "rgb_style": "breathing",
+        "temperature_unit": "C"
+    }
+}
