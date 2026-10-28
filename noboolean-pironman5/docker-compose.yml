@@ -21,3 +21,13 @@ services:
       - ${APP_DATA_DIR}/custom-oled/pages:/opt/pironman5/venv/lib/python3.12/site-packages/pm_auto/addons/oled/pages:ro
       - ${APP_DATA_DIR}/custom-www:/opt/pironman5/venv/lib/python3.12/site-packages/pm_dashboard/www:ro
       - ${APP_DATA_DIR}/custom-oled/variants/oled.py:/opt/pironman5/venv/lib/python3.12/site-packages/pironman5/variants/modules/oled.py:ro
+
+  # read-only containers list for the dashboard's Containers card (GET :34002/api/v1.0/get-containers)
+  containers-api:
+    image: sunfounder/pironman5:base-1.3.11@sha256:116b397b2bd857ba4664b97a43b1ccf8c47f0b9533c067517c88197f0c4589d6
+    restart: on-failure
+    network_mode: host
+    entrypoint: ["python3", "/app/containers_api.py"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${APP_DATA_DIR}/containers-api:/app:ro
