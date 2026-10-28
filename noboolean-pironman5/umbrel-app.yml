@@ -3,7 +3,7 @@ id: noboolean-pironman5
 category: automation
 name: Pironman 5 (2G)
 icon: "https://raw.githubusercontent.com/noboolean/umbrel-community-app-store/main/noboolean-pironman5/icon.svg"
-version: "1.3.11-nb.1"
+version: "1.3.11-nb.2"
 tagline: Premium aluminum case with tower cooling, OLED & RGB for Raspberry Pi 5
 description: |-
   Premium aluminum case for Raspberry Pi 5 with a tower cooler, dual RGB fans, 0.96" OLED display, addressable RGB LEDs, and NVMe SSD expansion.
