@@ -37,6 +37,8 @@ def _docker_get(path, timeout=5):
 def _short_name(c):
     labels = c.get("Labels") or {}
     proj, svc = labels.get("com.docker.compose.project"), labels.get("com.docker.compose.service")
+    if proj and "-" in proj and proj.split("-", 1)[0] in ("noboolean", "sunfounder"):
+        proj = proj.split("-", 1)[1]
     if proj and svc:
         return proj if svc in ("app", "web", "server") and len(proj) <= 14 else f"{proj}/{svc}"
     names = c.get("Names") or []
