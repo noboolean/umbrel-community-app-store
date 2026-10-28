@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from pm_auto.libs.utils import get_font
 from pm_auto.libs.oled_page import OLEDPage
+from PIL import ImageFont
 
 font = get_font("UbuntuSans-Regular.ttf")
 SOCK = "/var/run/docker.sock"
@@ -100,6 +101,20 @@ class _Sampler:
 _sampler = None
 
 
+_f11 = None
+
+
+def _fit(text, width=62):
+    global _f11
+    if _f11 is None:
+        _f11 = ImageFont.truetype(font, 11)
+    if _f11.getlength(text) <= width:
+        return text
+    while text and _f11.getlength(text + ".") > width:
+        text = text[:-1]
+    return text + "."
+
+
 def _mem(b):
     if b >= 1024 ** 3:
         return f"{b / 1024 ** 3:.1f}G"
@@ -123,7 +138,7 @@ class PageContainers(OLEDPage):
             return
         for i, (name, cpu, mem) in enumerate(top):
             y = 19 + i * 15
-            oled.draw_text(name[:13], 0, y, size=11, font_path=font)
+            oled.draw_text(_fit(name), 0, y, size=11, font_path=font)
             oled.draw_text(f"{cpu:.0f}%" if ready else "..", 92, y, size=11, font_path=font, align="right")
             oled.draw_text(_mem(mem), 127, y, size=11, font_path=font, align="right")
         oled.display()
