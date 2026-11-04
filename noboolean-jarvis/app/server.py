@@ -114,9 +114,11 @@ async def run_grok(extra):
     while len(parts) > 1 and re.match(r"\s*(I'll|I will|Let me|One moment|Allow me|Checking|Give me)\b", parts[0], re.I): parts.pop(0)
     return " ".join(x.strip() for x in parts if x.strip())
 
-def build_prompt(text):
+def now_str():
     from datetime import datetime; from zoneinfo import ZoneInfo
-    now = datetime.now(ZoneInfo(USER_TZ)).strftime("%A %B %d %Y, %I:%M %p %Z")
+    return datetime.now(ZoneInfo(USER_TZ)).strftime("%A %B %d %Y, %I:%M %p %Z")
+def build_prompt(text):
+    now = now_str()
     mem = f"Long-term memory about the user (always apply):\n{load_mem()}\n\nCurrent local time for the user: {now}.\n\n"
     hist = "\n".join(f"User: {u}\nAssistant: {a}" for u, a in history)
     return f"{PREAMBLE}\n\n{mem}" + (f"Conversation so far:\n{hist}\n\n" if hist else "") + f"User: {text}\nAssistant:"
@@ -149,7 +151,7 @@ ALLOWED_KINDS = {"search", "fetch", "think"}
 class WarmGrok:
     """One long-lived `grok agent stdio` (ACP) process; a fresh session per turn (no cold start).
     Any failure -> caller falls back to the old `grok -p` path."""
-    def __init__(self): self.p = None; self.n = 0; self.pending = {}; self.chunks = {}; self.reader = None
+    def __init__(self): self.p = None; self.n = 0; self.pending = {}; self.chunks = {}; self.reader = None; self.sid = None; self.turns = 0; self.mem = None
     async def start(self):
         self.p = await asyncio.create_subprocess_exec(GROK, "agent", "-m", GROK_MODEL, "--reasoning-effort", os.environ.get("GROK_EFFORT", "low"), "stdio",
             cwd="/tmp/gv", stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, limit=1 << 24)
@@ -192,17 +194,30 @@ class WarmGrok:
         finally:
             for f in self.pending.values():
                 if not f.done(): f.set_exception(RuntimeError("grok agent exited"))
-    async def ask(self, prompt, timeout=60):
-        if not self.alive(): await self.start()
-        sid = (await self.call("session/new", {"cwd": "/tmp/gv", "mcpServers": []}, 20))["sessionId"]
-        self.chunks[sid] = []
+    async def ask(self, text, timeout=60):
+        """Reuses one session for up to 12 turns so the model's prompt cache stays hot;
+        the first turn of a session carries persona + memory + history, later turns only the new utterance."""
+        if not self.alive(): await self.start(); self.sid = None
+        t0 = time.time(); mem = load_mem()
+        if self.sid is None or self.turns >= 12 or mem != self.mem:
+            if self.sid:
+                try: await self.call("session/close", {"sessionId": self.sid}, 5)
+                except Exception: pass
+            self.sid = (await self.call("session/new", {"cwd": "/tmp/gv", "mcpServers": []}, 20))["sessionId"]
+            self.turns = 0; self.mem = mem; prompt = build_prompt(text)
+        else:
+            prompt = f"(Current local time: {now_str()}. Same rules as before: short spoken reply, tags when relevant.)\nUser: {text}\nAssistant:"
+        t1 = time.time(); sid = self.sid; self.chunks[sid] = []
         try:
             await self.call("session/prompt", {"sessionId": sid, "prompt": [{"type": "text", "text": prompt}]}, timeout)
+            self.turns += 1
             return "".join(self.chunks[sid]).strip()
+        except Exception:
+            self.sid = None; raise
         finally:
             self.chunks.pop(sid, None)
-            try: await self.call("session/close", {"sessionId": sid}, 5)
-            except Exception: pass
+            log.info("warm grok new_session_ms=%d prompt_ms=%d turn=%d", int((t1-t0)*1000), int((time.time()-t1)*1000), self.turns)
+    def reset(self): self.sid = None
     def kill(self):
         try: self.p and self.p.kill()
         except Exception: pass
@@ -226,7 +241,7 @@ async def ask_grok(text):
     prompt = build_prompt(text)
     if USE_WARM:
         try:
-            out = await warm.ask(prompt)
+            out = await warm.ask(text)
             if out: return strip_narration(out)
             log.warning("warm grok empty reply; falling back")
         except Exception as e:
@@ -385,7 +400,7 @@ async def say(text: str = Query(...), format: str = Query("mp3"), engine: str = 
 
 @app.post("/reset")
 async def reset():
-    history.clear(); save_hist(); return {"ok": True, "memory_kept": True}
+    history.clear(); save_hist(); warm.reset(); return {"ok": True, "memory_kept": True}
 
 @app.post("/text")
 async def text_turn(q: str = Query(...)):
