@@ -3,7 +3,7 @@ id: noboolean-jarvis
 category: automation
 name: Jarvis (2G)
 icon: "https://raw.githubusercontent.com/noboolean/umbrel-community-app-store/main/noboolean-jarvis/icon.svg"
-version: "1.0.0-nb.7"
+version: "1.0.0-nb.8"
 tagline: Voice assistant server for the Echo Show 5 (Grok + ElevenLabs)
 description: |-
   JARVIS voice server used by the HOME/JARVIS app on an Echo Show.
@@ -25,4 +25,4 @@ deterministicPassword: false
 torOnly: false
 submitter: noboolean
 submission: ""
-releaseNotes: "nb.7: \"show me the weather\" displays a weather card (now, hourly strip, 5-day) rendered server-side from Open-Meteo."
+releaseNotes: "nb.8: lip-sync viseme timeline (ElevenLabs stream with timestamps, /visemes/{sid}); weather card; /preview mockup route."

@@ -310,16 +310,41 @@ async def tts(text, fmt, engine="auto"):
     return await asyncio.to_thread(piper_tts, text), "audio/wav", "piper"
 
 STREAMS = {}
+# viseme classes: 0 rest, 1 closed (M/B/P), 2 open (A), 3 wide (E/I), 4 round (O/U/W), 5 teeth (F/V), 6 mid consonant, 7 tongue (L/TH/D/T/N)
+VIS_MAP = {**{c: 1 for c in "mbp"}, **{c: 2 for c in "ah"}, **{c: 3 for c in "eiy"}, **{c: 4 for c in "ouwq"}, **{c: 5 for c in "fv"},
+           **{c: 7 for c in "ltdn"}, **{c: 6 for c in "cgjkrsxzk"}}
+def visemes_from(al, offset):
+    out = []
+    for ch, t0, t1 in zip(al.get("characters", []), al.get("character_start_times_seconds", []), al.get("character_end_times_seconds", [])):
+        v = VIS_MAP.get(ch.lower(), 0 if not ch.isalnum() else 6)
+        ms = int((t0 + offset) * 1000)
+        if out and out[-1][1] == v: continue
+        out.append([ms, v])
+    return out
 async def el_stream_task(sid, text):
     st = STREAMS[sid]
     try:
         async with httpx.AsyncClient(timeout=30) as c:
-            async with c.stream("POST", f"https://api.elevenlabs.io/v1/text-to-speech/{EL_VOICE}/stream?output_format=mp3_44100_128&optimize_streaming_latency=3",
+            async with c.stream("POST", f"https://api.elevenlabs.io/v1/text-to-speech/{EL_VOICE}/stream/with-timestamps?output_format=mp3_44100_128&optimize_streaming_latency=3",
                     headers={"xi-api-key": EL_KEY}, json={"text": text, "model_id": EL_MODEL}) as r:
                 if r.status_code != 200: raise RuntimeError(f"elevenlabs stream {r.status_code}")
-                async for ch in r.aiter_bytes(4096):
-                    if not st["t1"]: st["t1"] = time.time()
-                    st["buf"].append(ch); st["ev"].set()
+                nbytes = 0; last_end = 0.0; offset = 0.0
+                async for line in r.aiter_lines():
+                    line = line.strip()
+                    if not line: continue
+                    try: j = json.loads(line)
+                    except Exception: continue
+                    a = j.get("audio_base64")
+                    al = j.get("alignment") or j.get("normalized_alignment")
+                    if al and al.get("character_start_times_seconds"):
+                        first = al["character_start_times_seconds"][0]
+                        if first + offset < last_end - 0.05: offset = nbytes * 8 / 128000  # times restarted per chunk
+                        st["vis"] += visemes_from(al, offset); last_end = al["character_end_times_seconds"][-1] + offset
+                    if a:
+                        ch = base64.b64decode(a); nbytes += len(ch)
+                        if not st["t1"]: st["t1"] = time.time()
+                        st["buf"].append(ch); st["ev"].set()
+                st["vis"].append([int(last_end * 1000) + 60, 0])
     except Exception as e:
         log.warning("tts stream %s; piper fallback", e)
         if not st["buf"]:
@@ -328,10 +353,22 @@ async def el_stream_task(sid, text):
         st["done"] = True; st["ev"].set()
 def start_stream(text):
     sid = hashlib.sha1(f"{time.time()}{text}".encode()).hexdigest()[:12]
-    STREAMS[sid] = {"buf": [], "done": False, "ev": asyncio.Event(), "ctype": "audio/mpeg", "t0": time.time(), "t1": 0}
+    STREAMS[sid] = {"buf": [], "done": False, "ev": asyncio.Event(), "ctype": "audio/mpeg", "t0": time.time(), "t1": 0, "vis": []}
     for k in [k for k, v in STREAMS.items() if time.time() - v["t0"] > 300]: STREAMS.pop(k, None)
     asyncio.create_task(el_stream_task(sid, text)); return sid
 from fastapi.responses import StreamingResponse
+@app.get("/visemes/{sid}")
+async def visemes(sid: str):
+    """Lip-sync timeline for a streamed reply: [[ms, viseme], ...]; poll until done."""
+    st = STREAMS.get(sid)
+    if not st: return {"done": True, "v": []}
+    return {"done": st["done"], "v": st["vis"]}
+@app.post("/visemes_demo")
+async def visemes_demo(text: str = Query(...)):
+    """Preview helper: synthesize text, return mp3 (base64) + viseme timeline."""
+    sid = start_stream(text); st = STREAMS[sid]
+    while not st["done"]: await asyncio.sleep(0.1)
+    return {"audio": base64.b64encode(b"".join(st["buf"])).decode(), "ctype": st["ctype"], "v": st["vis"]}
 @app.get("/audio/{sid}")
 async def audio_stream(sid: str):
     st = STREAMS.get(sid)
