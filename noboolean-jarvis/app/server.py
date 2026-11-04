@@ -398,6 +398,8 @@ async def body_audio(request):
     return await request.body()
 
 import re
+DISMISS_RE = re.compile(r"^\W*(?:(?:oh|um+|uh+|ok(?:ay)?|no|jarvis)[,\s]+)*(?:cancel(?: that| it)?|never ?mind|nevermind|stop(?: it| that)?|forget (?:it|that|about it)|that'?s (?:all|it)|nothing|no thanks?|no thank you|not now|quiet|shush|shut up|be quiet|disregard|ignore (?:that|it)|scratch that|abort|go away|dismiss(?:ed)?|all done|done|i'?m (?:good|fine|done)|we'?re (?:good|done))(?:[,\s]+(?:jarvis|thanks?|thank you|please))*\W*$", re.I)
+def is_dismiss(t): return bool(t) and len(t) < 40 and bool(DISMISS_RE.match(t.strip()))
 LOOK_RE = re.compile(r"\b(look at (this|that|me|it)|what am i holding|what('s| is) (this|that)\s*[?.!]*$|what is this thing|read (this|that)|identify (this|that)|what (do|can) you see|what color is (this|that)|what('s| is) in my hand|how many fingers|what('s| is) (this|that) (thing|object|called)|tell me what (this|that) is|what('s| is) (this|that) (in my hand|i'm holding)|can you see|what do you see|take a (look|picture|photo))(?!\w)", re.I)
 
 SFX_DIR = os.path.join(BASE, "sfx"); os.makedirs(SFX_DIR, exist_ok=True)
@@ -776,6 +778,80 @@ def teach_div(a, b):
         else: lines.append((" " * (L + 1) + str(nxt).rjust(w) + (" ← r" if nxt else ""), "carry"))
     say = [f"{b} goes into {a} {q} times" + (f" with {rem} left over" if rem else " exactly")]
     return lines, steps[:6], say
+def _pm_norm(t):
+    e = t.lower().replace(",", "").replace("what's", "what is")
+    for x, y in _MATH_SUBS: e = re.sub(x, y, e)
+    e = re.sub(r"\)\s*(?:x|×|times|multiplied by)\s*", ")*", e); e = re.sub(r"(?:\bx|×|\btimes|multiplied by)\s*\(", "*(", e)
+    e = re.sub(r"(\d)\s*\(", r"\1*(", e); e = re.sub(r"\)\s*\(", ")*(", e)
+    e = re.sub(r"(\d)\.(?!\d)", r"\1", e)
+    c = [x.strip() for x in re.findall(r"[\d\.\s\+\-\*/\(\)]+", e) if re.search(r"\d", x)]
+    c = [x for x in c if len(re.findall(r"\*\*|[\+\-\*/]", x)) >= 2 and re.search(r"\d", x)]
+    if not c: return None
+    ex = max(c, key=len).strip().rstrip("+-*/. ")
+    while ex.count("(") > ex.count(")") and ex.startswith("("): ex = ex[1:]
+    while ex.count(")") > ex.count("(") and ex.endswith(")"): ex = ex[:-1]
+    return ex
+def teach_pemdas(text):
+    import ast, operator as O
+    ex = _pm_norm(text)
+    if not ex: return None
+    try: tree = ast.parse(ex, mode="eval").body
+    except Exception: return None
+    OPS = {ast.Add: ("+", 1, O.add, "add"), ast.Sub: ("−", 1, O.sub, "subtract"), ast.Mult: ("×", 2, O.mul, "multiply"), ast.Div: ("÷", 2, O.truediv, "divide"), ast.Pow: ("^", 3, O.pow, "power")}
+    def ok(n):
+        if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)): return True
+        if isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.USub): return ok(n.operand)
+        return isinstance(n, ast.BinOp) and type(n.op) in OPS and ok(n.left) and ok(n.right)
+    if not ok(tree) or not isinstance(tree, ast.BinOp): return None
+    def num(v):
+        if isinstance(v, float) and v.is_integer(): v = int(v)
+        return v
+    def val(n): return -val(n.operand) if isinstance(n, ast.UnaryOp) else n.value
+    def pr(n, parent=0, right=False):
+        if isinstance(n, ast.Constant): return _fmt(n.value) if not isinstance(n.value, int) else _c(n.value)
+        if isinstance(n, ast.UnaryOp): return "−" + pr(n.operand, 9)
+        sym, p, _, _ = OPS[type(n.op)]
+        if sym == "^": s = pr(n.left, 4) + {"2": "²", "3": "³"}.get(pr(n.right, 4), "^" + pr(n.right, 4))
+        else: s = f"{pr(n.left, p)} {sym} {pr(n.right, p, True)}"
+        return f"({s})" if p < parent or (right and p == parent and sym in "−÷") else s
+    def depth_paren(n, parent=0, right=False):  # is this node inside explicit grouping?
+        return False
+    lines = [(pr(tree), "num")]; steps = []; say = []
+    for _ in range(12):
+        if isinstance(tree, ast.Constant): break
+        # candidates: BinOps whose children are constants
+        cand = []
+        def walk(n, inparen, path):
+            if isinstance(n, ast.BinOp):
+                p = OPS[type(n.op)][1]
+                for ch, side in ((n.left, "left"), (n.right, "right")):
+                    if isinstance(ch, ast.BinOp) and (OPS[type(ch.op)][1] < p or (side == "right" and OPS[type(ch.op)][1] == p)): walk(ch, inparen + 1, path + [(n, side)])
+                    else: walk(ch, inparen, path + [(n, side)])
+                if all(isinstance(c, (ast.Constant, ast.UnaryOp)) for c in (n.left, n.right)): cand.append((inparen, p, n.col_offset, n, path))
+        walk(tree, 0, [])
+        if not cand: return None
+        cand.sort(key=lambda c: (-c[0], -c[1], c[2])); ip, p, _, n, path = cand[0]
+        sym, _, f, verb = OPS[type(n.op)]
+        a, b = val(n.left), val(n.right)
+        if sym == "÷" and b == 0: return None
+        r = num(f(a, b)); r = round(r, 6) if isinstance(r, float) else r
+        if abs(r) > 1e12: return None
+        why = "Parentheses first" if ip else {3: "Exponents next", 2: "Multiply / divide next, left to right", 1: "Then add / subtract, left to right"}[p]
+        if not ip and p == 3: why = "Exponents first"
+        if not ip and p == 2 and not steps: why = "Multiply / divide before adding or subtracting"
+        steps.append(f"{why}: {pr(n)} = {_fmt(r)}.")
+        spk = pr(n).replace('×', 'times').replace('÷', 'divided by').replace('−', 'minus').replace('+', 'plus').replace('²', ' squared').replace('³', ' cubed')
+        say.append((f"brackets first, {spk} is {_fmt(r)}" if ip else f"{verb} first, {spk} is {_fmt(r)}").replace("power first", "powers first") if not say else f"then {spk} is {_fmt(r)}")
+        new = ast.Constant(r) if r >= 0 else ast.UnaryOp(ast.USub(), ast.Constant(-r))
+        if not path: tree = new
+        else:
+            par, side = path[-1]; setattr(par, side, new)
+        lines.append((("= " + pr(tree)), "result" if isinstance(tree, (ast.Constant, ast.UnaryOp)) else "num"))
+    else: return None
+    steps.insert(0, "Order of operations (PEMDAS): Parentheses, Exponents, Multiply/Divide, Add/Subtract.")
+    ans = _fmt(val(tree)) if not isinstance(val(tree), int) else _c(val(tree))
+    steps.append(f"So the answer is {ans}.")
+    return lines[0][0], lines, "lines", steps, ans, say
 def teach_parts(text):
     """Returns (title, grid_or_lines, kind, steps, answer, say) or None."""
     t = text.lower().replace(",", "").replace("what's", "what is")
@@ -797,6 +873,8 @@ def teach_parts(text):
             say = [f"it sits between {lo} and {lo+1}", f"about {r:.2f}"]
         return f"√{_fmt(a)}", [("√", _fmt(a), "num"), ("", "", "line"), ("", _fmt(r if ri*ri != a else ri), "result")], "grid", steps, _fmt(round(r, 4)), say
     if not MATH_HINT.search(t): return None
+    pm = teach_pemdas(t)
+    if pm: return pm
     e = t
     for x, y in _MATH_SUBS: e = re.sub(x, y, e)
     e = re.sub(r"(\d)\.(?!\d)", r"\1", e)
@@ -1117,6 +1195,8 @@ async def _respond(text):
 async def pipeline(data, fmt, stream=False):
     t0 = time.time()
     text = await asyncio.to_thread(transcribe, data); t1 = time.time()
+    if is_dismiss(text):
+        log.info("dismiss %r", text); return text, "", b"", "audio/mpeg", "none", {"stt_ms": int((t1-t0)*1000), "action": "dismiss"}
     if text and LOOK_RE.search(text):
         audio, ctype, engine = await tts("Let me take a look.", fmt)
         return text, "Let me take a look.", audio, ctype, engine, {"stt_ms": int((t1-t0)*1000), "action": "look"}
@@ -1175,6 +1255,7 @@ async def reset():
 @app.post("/text")
 async def text_turn(q: str = Query(...)):
     t0 = time.time()
+    if is_dismiss(q): return {"reply": "", "action": "dismiss", "emotion": "neutral", "image": None, "caption": "", "sfx": None, "sfx_url": None, "llm_ms": 0, "sfx_ms": 0}
     async with lock:
         reply, image, caption = await respond(q); history.append((q, reply + (f" [showed picture: {caption}]" if image else (" [showed X posts]" if caption else "")))); save_hist()
     sq = LAST_SFX.get("q"); t1 = time.time(); fx = await sound_effect(sq) if sq else None
