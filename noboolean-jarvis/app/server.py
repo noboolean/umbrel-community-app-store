@@ -767,7 +767,7 @@ def teach_div(a, b):
     if rem: steps.append(f"As a decimal: {a/b:,.4f}".rstrip("0").rstrip(".") + ".")
     # render rows as long-division text (right-aligned to column index i)
     L = len(str(b)) + 1
-    lines = [(" " * (L + 1) + str(q).rjust(len(s)), "result"), (" " * (L + 1) + "─" * len(s), "line_t"), (f"{b}) {s}", "num")]
+    lines = [(" " * (L + 1) + str(q).rjust(len(s)), "result"), (" " * (L + 1) + "─" * len(s), "line_t"), (f"{b}) {s}", "divrow")]
     for k, (i, c, sb) in enumerate(rows):
         w = i + 1
         lines.append((" " * (L + 1) + ("−" + str(sb)).rjust(w), "dim"))
@@ -845,14 +845,16 @@ def render_teach(title, layout, kind, steps, answer):
             if lab: d.text((xr - (len(txt) + 0.7) * cw, y), lab, font=mono if len(lab) == 1 else small, fill=gr, anchor="ra")
             y += lh
     else:
-        n = len(layout); fs = 34 if n <= 6 else (28 if n <= 8 else 22); mono = _ff("DejaVuSansMono.ttf", fs); monob = _ff("DejaVuSansMono-Bold.ttf", fs)
+        n = len(layout); fs = 34 if n <= 6 else (28 if n <= 8 else 22)
+        fs = max(16, min(fs, int((LW - 60) / (0.61 * max(len(t) for t, _ in layout)))))
+        mono = _ff("DejaVuSansMono.ttf", fs); monob = _ff("DejaVuSansMono-Bold.ttf", fs)
         cw = d.textlength("0", font=mono); widest = max(len(t) for t, _ in layout); x0 = max(44, (28 + LW) / 2 - widest * cw / 2); y = 92
         for txt, st in layout:
             if st == "line_t":
                 k = len(txt) - len(txt.lstrip()); d.line([x0 + (k - 1.2) * cw, y + fs * 0.1, x0 + len(txt) * cw, y + fs * 0.1], fill=gr, width=3)
                 d.line([x0 + (k - 1.2) * cw, y + fs * 0.1, x0 + (k - 1.6) * cw, y + fs * 1.25], fill=gr, width=3); y += fs * 0.3; continue
             col = {"result": acc, "dim": gr, "carry": amber}.get(st, wh)
-            d.text((x0, y), txt.replace(")", " "), font=monob if st == "result" else mono, fill=col); y += fs * 1.15
+            d.text((x0, y), txt.replace(")", " ") if st == "divrow" else txt, font=monob if st == "result" else mono, fill=col); y += fs * 1.15
     # numbered steps
     n = len(steps); fs = 21 if n <= 3 else (19 if n <= 5 else 17); f = _ff("DejaVuSans.ttf", fs); fb = _ff("DejaVuSans-Bold.ttf", fs)
     x, y, maxw = LW + 30, 84, W - LW - 70
@@ -878,14 +880,137 @@ def render_teach(title, layout, kind, steps, answer):
         try: os.remove(os.path.join(IMG_DIR, old))
         except Exception: pass
     return name
+# ---------------- deterministic light algebra (sympy), teacher-style ----------------
+ALG_RE = re.compile(r"\b(solve|simplify|evaluate|expand|factor|find (?:the value of )?[xyn]|what(?:'s| is) [xyn]|for [xyn]|when [xyn] ?(?:=|is|equals))\b|\b\d*\s*[xyn]\s*(?:\^|\*\*|squared|[+\-*/)]|plus|minus|times|over|divided)[^=]*(?:=|equals)|(?:=|equals)[^=]*\b\d*[xyn]\b", re.I)
+def _alg_norm(t):
+    t = t.lower().replace("what's", "what is").replace("−", "-").replace("–", "-").replace("×", "*").replace("÷", "/")
+    t = re.sub(r"^\W*(?:hey )?(?:jarvis,?\s*)?(?:can you |could you |please )*(?:show me (?:how to )?|help me )?", "", t)
+    for a, b in [(r"\bis equal to\b|\bequals\b|\bequal\b", "="), (r"\bplus\b", "+"), (r"\bminus\b", "-"), (r"\btimes\b|\bmultiplied by\b", "*"),
+                 (r"\bdivided by\b|\bover\b", "/"), (r"\bsquared\b", "**2"), (r"\bcubed\b", "**3"), (r"\bto the power of\b|\^", "**"), (r"(\d)\s+x\s+(\d)", r"\1*\2")]:
+        t = re.sub(a, b, t)
+    return t
+def _pp(e):
+    import sympy as sp
+    s = sp.sstr(e, order="grlex") if not isinstance(e, (int,)) else str(e)
+    s = re.sub(r"\*\*2\b", "²", s); s = re.sub(r"\*\*3\b", "³", s); s = s.replace("**", "^")
+    s = re.sub(r"(\d)\*([a-z(])", r"\1\2", s); s = re.sub(r"\)\*\(", ")(", s); s = s.replace("*", "·").replace("sqrt", "√").replace("-", "−")
+    return s
+def teach_algebra(text):
+    """Returns (title, lines, 'lines', steps, answer, say) or None."""
+    if not ALG_RE.search(text): return None
+    import sympy as sp
+    from sympy.parsing.sympy_parser import parse_expr, standard_transformations, implicit_multiplication_application, convert_xor
+    T = standard_transformations + (implicit_multiplication_application, convert_xor)
+    t = _alg_norm(text)
+    var = sp.Symbol(next((v for v in "xyn" if re.search(rf"(?<![a-z]){v}(?![a-z])", t)), "x"))
+    loc = {var.name: var}
+    ev = re.search(rf"(?:when|if|for|where|with)\s+{var.name}\s*(?:=|is)\s*(-?\d+(?:\.\d+)?)", t)
+    core = re.sub(rf"(?:when|if|where|with)\s+{var.name}\s*(?:=|is)\s*-?\d+(?:\.\d+)?", "", t) if ev else t
+    core = re.sub(r"\b(solve|simplify|evaluate|expand|factor|find|what is|the value of|for [xyn]|if|then|and)\b", " ", core)
+    core = re.sub(rf"^\s*{var.name}\s*(?:,|:)", " ", core)
+    core = re.sub(rf"^\s*{var.name}\s+(?=[\d{var.name}(])", " ", core.strip())
+    core = re.sub(r"[^0-9a-z=+\-*/().^ ]", " ", core).strip(" .=")
+    core = re.sub(r"\s+", " ", core)
+    if not core or not re.search(r"\d|[xyn]", core): return None
+    P = lambda s: parse_expr(s, local_dict=loc, transformations=T)
+    lines, steps, say = [], [], []
+    try:
+        if "=" in core and not ev:
+            L, R = [P(x) for x in core.split("=")[:2]]
+            if not (L.has(var) or R.has(var)): return None
+            raw = re.sub(r"\s+", " ", core.replace("**2", "²").replace("**3", "³").replace("*", "·").replace("-", "−")).strip()
+            raw = re.sub(r"\s*([=+−])\s*", r" \1 ", raw).replace("( ", "(").replace(" )", ")").strip()
+            raw = re.sub(r"\(\s*−\s*", "(−", raw)
+            raw = re.sub(r"\s+([²³])", r"\1", raw)
+            title = f"Solve {raw}"; lines.append((raw, "num"))
+            deg = sp.degree(sp.expand(L - R), var)
+            if deg == 1 and "(" in core and f"{_pp(L)} = {_pp(R)}" != raw:
+                steps.append(f"Distribute: multiply into the brackets → {_pp(L)} = {_pp(R)}."); lines.append((f"{_pp(L)} = {_pp(R)}", "num")); say.append("open the brackets")
+            elif deg != 1 and f"{_pp(L)} = {_pp(R)}" != raw: lines.append((f"{_pp(L)} = {_pp(R)}", "num"))
+            if deg == 1:
+                if sp.expand(L) != L or sp.expand(R) != R:
+                    L, R = sp.expand(L), sp.expand(R); steps.append("Distribute / expand the brackets."); lines.append((f"{_pp(L)} = {_pp(R)}", "num"))
+                c = sp.expand(R).coeff(var, 1)
+                if c != 0:
+                    L, R = sp.expand(L - c * var), sp.expand(R - c * var)
+                    steps.append(f"{'Subtract' if c > 0 else 'Add'} {_pp(abs(c) * var)} {'from' if c > 0 else 'to'} both sides to get the {var}'s together."); lines.append((f"{_pp(L)} = {_pp(R)}", "num"))
+                b = sp.expand(L).coeff(var, 0)
+                if b != 0:
+                    L, R = sp.expand(L - b), sp.expand(R - b)
+                    steps.append(f"{'Subtract' if b > 0 else 'Add'} {_pp(abs(b))} {'from' if b > 0 else 'to'} both sides to undo the {'+' if b > 0 else '−'} {_pp(abs(b))}."); lines.append((f"{_pp(L)} = {_pp(R)}", "num"))
+                    say.append(f"{'take away' if b > 0 else 'add'} {_pp(abs(b))} on both sides")
+                a = sp.expand(L).coeff(var, 1)
+                if a != 1:
+                    if a.is_Rational and a.q != 1 and a.p == 1:
+                        steps.append(f"Multiply both sides by {a.q} to undo the ÷ {a.q}."); say.append(f"multiply both sides by {a.q}")
+                    else:
+                        steps.append(f"Divide both sides by {_pp(a)} to get {var} on its own."); say.append(f"divide both sides by {_pp(a)}")
+                    L, R = sp.simplify(L / a), sp.simplify(R / a)
+                sol = sp.nsimplify(R); lines.append((f"{var} = {_pp(sol)}", "result"))
+                L0, R0 = [P(x) for x in core.split("=")[:2]]
+                lines.append((f"✓ {_pp(L0.subs(var, sol))} = {_pp(R0.subs(var, sol))}", "carry"))
+                steps.append(f"Check: put {var} = {_pp(sol)} back in → {_pp(sp.simplify(L0.subs(var, sol)))} = {_pp(sp.simplify(R0.subs(var, sol)))} ✓")
+                ans = f"{var} = {_pp(sol)}"; say = (say or ["tidy it up"]) + [f"so {var} is {_pp(sol)}"]
+                return title, lines, "lines", steps, ans, say
+            if deg == 2:
+                E = sp.expand(L - R); a, b, c = [E.coeff(var, k) for k in (2, 1, 0)]
+                if R != 0: steps.append(f"Move everything to one side so it equals 0."); lines.append((f"{_pp(E)} = 0", "num"))
+                F = sp.factor(E); roots = sp.solve(E, var)
+                if F != E and all(r.is_rational for r in roots):
+                    lines.append((f"{_pp(F)} = 0", "num"))
+                    steps.append(f"Factor: find two numbers that multiply to {_pp(a*c)} and add to {_pp(b)} → {_pp(F)} = 0." if a == 1 else f"Factor: {_pp(F)} = 0.")
+                    steps.append("Zero-product rule: if two things multiply to 0, one of them must be 0.")
+                    say = [f"factor it as {_pp(F).replace(' − ', ' minus ').replace('−', 'minus ')}", "set each bracket to zero"]
+                else:
+                    D = b*b - 4*a*c
+                    steps.append(f"Use the quadratic formula with a = {_pp(a)}, b = {_pp(b)}, c = {_pp(c)}.")
+                    steps.append(f"Discriminant b² − 4ac = {_pp(D)}" + (" (negative → no real solutions)." if D < 0 else "."))
+                    lines.append((f"{var} = (−b ± √{_pp(D)}) / {_pp(2*a)}", "num")); say = ["use the quadratic formula"]
+                    if D < 0: return title, lines, "lines", steps, "no real solution", say + ["no real solutions"]
+                roots = sorted(roots, key=lambda r: float(r))
+                rs = [_pp(sp.nsimplify(r)) if r.is_rational else f"{float(r):.3f}".rstrip("0").rstrip(".").replace("-", "−") for r in roots]
+                if not all(r.is_rational for r in roots):
+                    lines.append((f"{var} = ({_pp(-b)} ± √{_pp(D)}) / {_pp(2*a)}", "num")); steps.append(f"So {var} = ({_pp(-b)} ± √{_pp(D)}) / {_pp(2*a)} ≈ " + " or ".join(rs) + ".")
+                lines.append((f"{var} = " + " or ".join(rs), "result"))
+                chk = ", ".join(f"{var}={r}: {_pp(sp.simplify(E.subs(var, rr)))}" for r, rr in zip(rs, roots) if rr.is_rational) or "both roots give 0 (exact form)"
+                steps.append(f"Check each in {_pp(E)}: {chk} ✓"); lines.append((f"✓ both give 0", "carry"))
+                ans = f"{var} = " + " or ".join(rs)
+                return title, lines, "lines", steps, ans, say + [f"{var} is " + " or ".join(rs)]
+            return None
+        E = P(core.split("=")[0])
+        if not E.has(var) and not ev: return None
+        if ev:
+            v = sp.nsimplify(ev.group(1)); title = f"{_pp(E)} when {var} = {_pp(v)}"
+            lines.append((_pp(E), "num"))
+            sub = _pp(E).replace(var.name, f"({_pp(v)})")
+            steps.append(f"Replace every {var} with {_pp(v)}."); lines.append((sub, "num"))
+            r = sp.nsimplify(E.subs(var, v)); terms = sp.Add.make_args(sp.expand(E))
+            if len(terms) > 1:
+                vals = [sp.nsimplify(tm.subs(var, v)) for tm in sorted(terms, key=lambda q: -sp.degree(q, var))]
+                mid = " + ".join(_pp(x) for x in vals).replace("+ −", "− ").replace("+ -", "− ")
+                steps.append("Order of operations: powers first, then × and ÷, so work out each term: " + ", ".join(f"{_pp(tm)} → {_pp(sp.nsimplify(tm.subs(var, v)))}" for tm in sorted(terms, key=lambda q: -sp.degree(q, var))) + ".")
+                lines.append((f"= {mid}", "num")); steps.append(f"Add them up: {mid} = {_pp(r)}.")
+            else: steps.append("Follow order of operations: powers, then × and ÷, then + and −.")
+            lines.append((f"= {_pp(r)}", "result"))
+            return title, lines, "lines", steps, _pp(r), [f"swap {var} for {_pp(v)}", f"and work it out to {_pp(r)}"]
+        S = sp.expand(E); title = f"Simplify {_pp(E)}"
+        lines.append((_pp(E), "num"))
+        if sp.expand(E) != E and E.has(sp.Mul) and any(isinstance(a, sp.Add) for a in sp.preorder_traversal(E) if a is not E):
+            steps.append("Expand the brackets (multiply each term inside).")
+        terms = sp.Add.make_args(E)
+        if len(terms) > 1: steps.append(f"Group like terms: the {var}-terms together and the plain numbers together.")
+        steps.append(f"Combine them → {_pp(S)}."); lines.append((f"= {_pp(S)}", "result"))
+        return title, lines, "lines", steps, _pp(S), [f"group the like terms", f"you get {_pp(S).replace('−', 'minus')}"]
+    except Exception as e:
+        log.warning("algebra %s: %s", core, e); return None
 async def math_card(text):
-    try: tp = teach_parts(text)
+    try: tp = teach_algebra(text) or teach_parts(text)
     except Exception as e: log.warning("teach: %s", e); tp = None
     if tp:
         title, layout, kind, steps, answer, say = tp
         name = await asyncio.to_thread(render_teach, title, layout, kind, steps, answer)
         sp = ", ".join(say); sp = sp[0].upper() + sp[1:]
-        if answer.split(" r ")[0] not in sp: sp += f". That's {answer.replace(' r ', ' remainder ')}"
+        if answer.split(" r ")[0].split("=")[-1].strip().split(" or ")[0].replace("−", "-") not in sp.replace("−", "-"): sp += f". That's {answer.replace(' r ', ' remainder ')}"
         return "[EMO:happy] " + sp + ". It's all on screen, sir.", f"{PUBLIC}/img/{name}", title
     return await _math_card_simple(text)
 async def _math_card_simple(text):
@@ -931,14 +1056,18 @@ async def _respond(text):
         except Exception as e: log.warning("weather card: %s", e)
     if FOLLOW_SHOW.search(text) and history:
         for prev_q, _r in reversed(list(history)[-3:]):
-            if math_card_parts(prev_q) or teach_parts(prev_q):
+            if math_card_parts(prev_q) or teach_parts(prev_q) or teach_algebra(prev_q):
                 got = await math_card(prev_q)
                 if got: return got
                 break
+    if ALG_RE.search(text) and not WX_RE.search(text):
+        try:
+            if teach_algebra(text): return await math_card(text)
+        except Exception as e: log.warning("algebra card: %s", e)
     if (re.search(r"\b(show|display|let me see|put)\b", text, re.I) or re.match(r"^\W*(?:what(?:'s| is)|calculate|compute|how much is)\b", text, re.I)) and not WX_RE.search(text):
         try:
             got = await math_card(text)
-            if got and re.search(r"\b(show|display|let me see|put|calculate)\b", text, re.I): return got
+            if got: return got
         except Exception as e: log.warning("math card: %s", e)
     for fn in (bible_card, define_card):
         try:
@@ -961,7 +1090,7 @@ async def _respond(text):
     cm = CARD_TAG.search(raw); raw = CARD_TAG.sub("", raw).strip()
     if cm:
         try:
-            if teach_parts(text):
+            if teach_parts(text) or teach_algebra(text):
                 _sp, u, title = await math_card(text)
                 return SHOW_TAG.sub("", POSTS_TAG.sub("", SFX_TAG.sub("", raw))).strip(), u, title
             u, title = await card_from(cm.group(1))
