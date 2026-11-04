@@ -117,9 +117,9 @@ async def run_grok(extra):
 def now_str():
     from datetime import datetime; from zoneinfo import ZoneInfo
     return datetime.now(ZoneInfo(USER_TZ)).strftime("%A %B %d %Y, %I:%M %p %Z")
-def build_prompt(text):
+def build_prompt(text, ctx=""):
     now = now_str()
-    mem = f"Long-term memory about the user (always apply):\n{load_mem()}\n\nCurrent local time for the user: {now}.\n\n"
+    mem = f"Long-term memory about the user (always apply):\n{load_mem()}\n\nCurrent local time for the user: {now}.\n" + (f"{ctx}\n" if ctx else "") + "\n"
     hist = "\n".join(f"User: {u}\nAssistant: {a}" for u, a in history)
     return f"{PREAMBLE}\n\n{mem}" + (f"Conversation so far:\n{hist}\n\n" if hist else "") + f"User: {text}\nAssistant:"
 
@@ -146,6 +146,33 @@ def memory_command(text):
         open(MEM, "w").write("\n".join(keep) + "\n")
         return f"Okay, I forgot that." if n else "I didn't have anything like that saved."
     return None
+
+WX_RE = re.compile(r"\b(weather|forecast|temperature|rain|raining|snow|sunny|cold|hot|warm|umbrella|jacket|wind|humid)\b", re.I)
+HOME_LATLON = os.environ.get("HOME_LATLON", "")   # "lat,lon" in data/.env; never committed
+HOME_PLACE = os.environ.get("HOME_PLACE", "home")
+WMO = {0:"clear",1:"mostly clear",2:"partly cloudy",3:"overcast",45:"fog",48:"fog",51:"light drizzle",53:"drizzle",55:"heavy drizzle",61:"light rain",63:"rain",65:"heavy rain",
+       71:"light snow",73:"snow",75:"heavy snow",80:"rain showers",81:"rain showers",82:"violent showers",95:"thunderstorms",96:"thunderstorms with hail",99:"thunderstorms with hail"}
+_wx = {"t": 0, "v": ""}
+async def home_weather():
+    """Pre-fetched local weather (Open-Meteo, free, no key) so the model needn't web-search for it."""
+    if not HOME_LATLON: return ""
+    if time.time() - _wx["t"] < 600: return _wx["v"]
+    try:
+        lat, lon = [x.strip() for x in HOME_LATLON.split(",")]
+        async with httpx.AsyncClient(timeout=4) as c:
+            j = (await c.get("https://api.open-meteo.com/v1/forecast", params={"latitude": lat, "longitude": lon, "timezone": "auto",
+                "temperature_unit": os.environ.get("WEATHER_UNITS", "fahrenheit"), "wind_speed_unit": "mph",
+                "current": "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,wind_speed_10m,precipitation",
+                "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code", "forecast_days": 2})).json()
+        cu, d = j["current"], j["daily"]
+        v = (f"Live weather for the user's home ({HOME_PLACE}) from Open-Meteo at {cu['time']}: {WMO.get(cu['weather_code'], 'code '+str(cu['weather_code']))}, "
+             f"{cu['temperature_2m']} degrees (feels {cu['apparent_temperature']}), humidity {cu['relative_humidity_2m']}%, wind {cu['wind_speed_10m']} mph. "
+             f"Today high {d['temperature_2m_max'][0]} low {d['temperature_2m_min'][0]}, rain chance {d['precipitation_probability_max'][0]}%; "
+             f"tomorrow {WMO.get(d['weather_code'][1], '')}, high {d['temperature_2m_max'][1]} low {d['temperature_2m_min'][1]}, rain chance {d['precipitation_probability_max'][1]}%. "
+             "Use this for home weather questions instead of searching.")
+        _wx.update(t=time.time(), v=v); return v
+    except Exception as e:
+        log.warning("home weather: %s", e); return ""
 
 ALLOWED_KINDS = {"search", "fetch", "think"}
 class WarmGrok:
@@ -194,7 +221,7 @@ class WarmGrok:
         finally:
             for f in self.pending.values():
                 if not f.done(): f.set_exception(RuntimeError("grok agent exited"))
-    async def ask(self, text, timeout=60):
+    async def ask(self, text, timeout=60, ctx=""):
         """Reuses one session for up to 12 turns so the model's prompt cache stays hot;
         the first turn of a session carries persona + memory + history, later turns only the new utterance."""
         if not self.alive(): await self.start(); self.sid = None
@@ -204,9 +231,9 @@ class WarmGrok:
                 try: await self.call("session/close", {"sessionId": self.sid}, 5)
                 except Exception: pass
             self.sid = (await self.call("session/new", {"cwd": "/tmp/gv", "mcpServers": []}, 20))["sessionId"]
-            self.turns = 0; self.mem = mem; prompt = build_prompt(text)
+            self.turns = 0; self.mem = mem; prompt = build_prompt(text, ctx)
         else:
-            prompt = f"(Current local time: {now_str()}. Same rules as before: short spoken reply, tags when relevant.)\nUser: {text}\nAssistant:"
+            prompt = f"(Current local time: {now_str()}. {ctx} Same rules as before: short spoken reply, tags when relevant.)\nUser: {text}\nAssistant:"
         t1 = time.time(); sid = self.sid; self.chunks[sid] = []
         try:
             await self.call("session/prompt", {"sessionId": sid, "prompt": [{"type": "text", "text": prompt}]}, timeout)
@@ -238,10 +265,11 @@ def strip_narration(reply):
 async def ask_grok(text):
     r = memory_command(text)
     if r: return r
-    prompt = build_prompt(text)
+    ctx = await home_weather() if WX_RE.search(text) else ""
+    prompt = build_prompt(text, ctx)
     if USE_WARM:
         try:
-            out = await warm.ask(text)
+            out = await warm.ask(text, ctx=ctx)
             if out: return strip_narration(out)
             log.warning("warm grok empty reply; falling back")
         except Exception as e:
