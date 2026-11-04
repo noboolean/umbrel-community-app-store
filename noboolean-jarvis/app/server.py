@@ -41,6 +41,10 @@ async def _learn_host(request, call_next):
     return await call_next(request)
 from fastapi.responses import FileResponse
 import hashlib
+@app.get("/preview")
+async def preview():
+    f = os.path.join(BASE, "preview.html")  # UI mockup lives in app-data, not the repo
+    return FileResponse(f, media_type="text/html") if os.path.exists(f) else Response("no preview", status_code=404)
 @app.get("/img/{name}")
 async def img(name: str):
     f = os.path.join(IMG_DIR, os.path.basename(name))
