@@ -467,11 +467,12 @@ def render_weather(j):
     from PIL import Image, ImageDraw, ImageFont
     import datetime
     W, H = 960, 424
-    im = Image.new("RGB", (W, H), (6, 12, 18)); d = ImageDraw.Draw(im)
+    im = Image.new("RGB", (W, H), (11, 15, 20)); d = ImageDraw.Draw(im)  # same as the app card background
     F = lambda n: ImageFont.load_default(n)
     acc = (0, 229, 255); gr = (144, 164, 174); wh = (255, 255, 255)
     cu, hr, dy = j["current"], j["hourly"], j["daily"]
-    d.rounded_rectangle([12, 10, W-12, 238], 22, fill=(12, 26, 36))
+    d.rounded_rectangle([12, 10, W-12, 238], 16, fill=(15, 23, 31), outline=(0, 78, 90), width=1)
+    d.line([470-14, 34, 470-14, 214], fill=(0, 60, 70), width=1)
     _wx_icon(d, cu["weather_code"], 100, 110, 120, cu.get("is_day", 1) == 1)
     d.text((185, 30), f"{round(cu['temperature_2m'])}°", font=F(96), fill=wh)
     d.text((190, 140), WMO.get(cu["weather_code"], "").capitalize(), font=F(28), fill=acc)
@@ -490,7 +491,7 @@ def render_weather(j):
     # 5-day row
     cw = (W-24-4*10) / 5
     for k in range(1, 6):
-        x = 12 + (k-1)*(cw+10); d.rounded_rectangle([x, 250, x+cw, H-6], 18, fill=(12, 26, 36)); m = x + cw/2
+        x = 12 + (k-1)*(cw+10); d.rounded_rectangle([x, 250, x+cw, H-6], 16, fill=(15, 23, 31), outline=(0, 78, 90) if k > 1 else (0, 229, 255), width=1); m = x + cw/2
         dn = datetime.date.fromisoformat(dy["time"][k]).strftime("%a")
         d.text((m, 272), dn, font=F(22), fill=acc, anchor="mm"); _wx_icon(d, dy["weather_code"][k], m, 318, 48)
         d.text((m, 370), f"{round(dy['temperature_2m_max'][k])}° / {round(dy['temperature_2m_min'][k])}°", font=F(22), fill=wh, anchor="mm")
@@ -501,6 +502,15 @@ def render_weather(j):
             try: os.remove(os.path.join(IMG_DIR, old))
             except Exception: pass
     return name
+@app.get("/wx_now")
+async def wx_now():
+    """Tiny current-conditions probe for the app's idle touches (rain on the chrome)."""
+    try:
+        cu = (await wx_data())["current"]; code = int(cu["weather_code"])
+        return {"rain": code in range(51, 68) or code in range(80, 83) or code >= 95, "code": code, "is_day": cu.get("is_day", 1)}
+    except Exception as e:
+        return {"rain": False, "error": str(e)[:120]}
+
 async def weather_card():
     j = await wx_data(); name = await asyncio.to_thread(render_weather, j)
     cu, dy = j["current"], j["daily"]
