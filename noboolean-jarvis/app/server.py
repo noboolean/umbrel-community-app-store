@@ -20,7 +20,7 @@ PREAMBLE = (f"You are JARVIS, {WHO}'s AI butler, in the spirit of Jarvis from Ir
             "Use web search only for live facts like weather, news or scores; answer general knowledge, maths, chit-chat and the time directly without any tools, it is much faster. "
             "You have a screen. Whenever the user asks about or mentions an animal, place, landmark, famous person, object or what something looks like, "
             "append a tag at the very end like [SHOW: giraffe] with a short Wikipedia-style search query; the device will display it. "
-            "Never say you cannot show images. "
+            "Never use [SHOW] for weather; the device shows its own forecast card for weather questions. Never say you cannot show images. "
             "Always begin your reply with one emotion tag for your face on screen: [EMO:happy], [EMO:sad], [EMO:mad], [EMO:laughing], [EMO:crying], [EMO:surprised], [EMO:smug] or [EMO:neutral]; pick the one that fits your reply. "
             "For anything about X/Twitter (trending, latest posts, what people are saying), use your X search tool, then summarise the gist in one or two spoken sentences without reading handles aloud, "
             "and append [POSTS: @handle: short text || @handle: short text] with up to 3 top posts for the screen. "
@@ -273,7 +273,7 @@ def strip_narration(reply):
 async def ask_grok(text):
     r = memory_command(text)
     if r: return r
-    ctx = await home_weather() if WX_RE.search(text) else ""
+    ctx = await home_weather() if WX_RE.search(text) and not wx_elsewhere(text) else ""
     prompt = build_prompt(text, ctx)
     if USE_WARM:
         try:
@@ -395,7 +395,7 @@ async def body_audio(request):
     return await request.body()
 
 import re
-LOOK_RE = re.compile(r"\b(look at (this|that|me|it)|what am i holding|what('s| is) (this|that) (in my hand|i'm holding)|can you see|what do you see|take a (look|picture|photo))\b", re.I)
+LOOK_RE = re.compile(r"\b(look at (this|that|me|it)|what am i holding|what('s| is) (this|that)\s*[?.!]*$|what is this thing|read (this|that)|identify (this|that)|what (do|can) you see|what color is (this|that)|what('s| is) in my hand|how many fingers|what('s| is) (this|that) (thing|object|called)|tell me what (this|that) is|what('s| is) (this|that) (in my hand|i'm holding)|can you see|what do you see|take a (look|picture|photo))(?!\w)", re.I)
 
 SFX_DIR = os.path.join(BASE, "sfx"); os.makedirs(SFX_DIR, exist_ok=True)
 SFX_TAG = re.compile(r"\[SFX:\s*([^\]]+)\]", re.I)
@@ -519,6 +519,12 @@ async def weather_card():
     return spoken, f"{PUBLIC}/img/{name}", f"{HOME_PLACE} weather"
 
 POSTS_TAG = re.compile(r"\[POSTS:\s*(.+?)\]\s*$", re.I | re.S)
+WX_ASK = re.compile(r"\b(weather|forecast|temperature|temp|degrees|rain|raining|rainy|snow|snowing|sunny|sun out|cloudy|overcast|storm|storms|stormy|thunder|cold|hot|warm|chilly|freez\w*|frost|umbrella|jacket|coat|wind|windy|humid|humidity)\b.*\b(today|tonight|tomorrow|this week|week|weekend|morning|afternoon|evening|monday|tuesday|wednesday|thursday|friday|saturday|sunday|now|outside|later|right now)\b|\b(weather|forecast|going to rain|gonna rain|will it rain|is it raining|be sunny|be cold|be hot|need (an )?umbrella|need a (jacket|coat))\b", re.I)
+WX_ELSEWHERE = re.compile(r"\b(in|at|for) (?!the\b|my\b|here\b|home\b|town\b|this\b|today\b|tomorrow\b|tonight\b|the week\b)[A-Z][a-z]+", 0)
+WHY_SHOW = re.compile(r"\b(why|did you|stop|don'?t|you showed|were you)\b.{0,30}\bshow", re.I)
+BANNED_IMG = re.compile(r"\bfrogs?\b|\btoads?\b", re.I)
+def wx_elsewhere(text):
+    return [m.group(0) for m in WX_ELSEWHERE.finditer(text) if not any(w.lower() in m.group(0).lower() for w in HOME_PLACE.replace(',', ' ').split() if len(w) > 2)]
 SHOW_TAG = re.compile(r"\[SHOW:\s*([^\]]+)\]", re.I)
 SHOW_REQ = re.compile(r"\bwhat (?:does|do) (?:an? |the )?(.+?) look like|\b(?:show me|can you show me|let me see|display)\s+(?:an? |the |some )?(?:(?:picture|photo|image|pic)s? of\s+)?(?:an? |the |some )?(.+?)[?.!]*$|\b(?:picture|photo|image|pic) of\s+(?:an? |the |some )?(.+?)[?.!]*$", re.I)
 EMO_RE = re.compile(r"\[\s*EMO\s*:\s*(\w+)\s*\]", re.I)
@@ -544,11 +550,13 @@ async def _respond(text):
         if q and not re.search(r"\b(weather|news|time|that)\b", q, re.I):
             import random
             LAST_SFX["q"] = q; return random.choice(SFX_QUIPS), None, ""
-    if HOME_LATLON and WX_SHOW.search(text):
+    if HOME_LATLON and WX_SHOW.search(text) and not wx_elsewhere(text):
         try: return await weather_card()
         except Exception as e: log.warning("weather card: %s", e)
-    m = SHOW_REQ.search(text)
-    if m:
+    _else = wx_elsewhere(text)
+    wx_q = bool(HOME_LATLON and WX_ASK.search(text) and not _else)
+    m = None if WHY_SHOW.search(text) else SHOW_REQ.search(text)
+    if m and not wx_q:
         q = next((g for g in m.groups() if g), "").strip()
         if q and not re.search(r"\b(weather|forecast|news|time)\b", q, re.I):
             u = await fetch_image(q)
@@ -561,6 +569,12 @@ async def _respond(text):
     pm = POSTS_TAG.search(raw); raw = POSTS_TAG.sub("", raw)
     tm = SHOW_TAG.search(raw)
     spoken = SHOW_TAG.sub("", raw).strip()
+    if tm and (WX_RE.search(tm.group(1)) or BANNED_IMG.search(tm.group(1))): tm = None
+    if wx_q or (tm is None and not _else and WX_RE.search(raw) and WX_ASK.search(text)):
+        try:
+            j = await wx_data(); name = await asyncio.to_thread(render_weather, j)
+            return spoken, f"{PUBLIC}/img/{name}", f"{HOME_PLACE} weather"
+        except Exception as e: log.warning("weather card: %s", e)
     if pm and not tm:
         return spoken, None, "\n\n".join(x.strip() for x in pm.group(1).split("||") if x.strip())
     if tm:
@@ -661,9 +675,12 @@ async def look(request: Request, format: str = Query("mp3"), q: str = Query(""))
               {"type": "image", "mimeType": mime, "data": base64.b64encode(imgb).decode()}]
     pf = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, dir="/tmp/gv"); json.dump(blocks, pf); pf.close()
     async with lock:
-        reply = await run_grok(["--prompt-json", open(pf.name).read()]); history.append((question + " [photo]", reply)); save_hist()
+        reply = await run_grok(["--prompt-json", open(pf.name).read()])
+        reply, emo = take_emotion(reply); reply = SFX_TAG.sub("", SHOW_TAG.sub("", POSTS_TAG.sub("", reply))).strip(); history.append((question + " [photo]", reply)); save_hist()
+    cam = f"cam_{int(time.time())}.jpg"; open(os.path.join(IMG_DIR, cam), "wb").write(imgb)
     os.unlink(pf.name); t2 = time.time()
     audio, ctype, engine = await tts(reply, format); t3 = time.time()
     t = {"stt_ms": int((t1-t0)*1000), "llm_ms": int((t2-t1)*1000), "tts_ms": int((t3-t2)*1000), "total_ms": int((t3-t0)*1000)}
     log.info("look %s | %r -> %r", t, question, reply)
-    return Response(audio, media_type=ctype, headers={"X-Transcript-B64": b64(question), "X-Reply-B64": b64(reply), "X-TTS-Engine": engine, "X-Timing": json.dumps(t)})
+    return Response(audio, media_type=ctype, headers={"X-Transcript-B64": b64(question), "X-Reply-B64": b64(reply), "X-TTS-Engine": engine, "X-Timing": json.dumps(t),
+                    "X-Emotion": emo, "X-Image": f"{PUBLIC}/img/{cam}", "X-Caption-B64": b64("What I see")})
