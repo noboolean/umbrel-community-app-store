@@ -23,6 +23,7 @@ PREAMBLE = (f"You are JARVIS, {WHO}'s AI butler, in the spirit of Jarvis from Ir
             "Never say you cannot show images. "
             "For anything about X/Twitter (trending, latest posts, what people are saying), use your X search tool, then summarise the gist in one or two spoken sentences without reading handles aloud, "
             "and append [POSTS: @handle: short text || @handle: short text] with up to 3 top posts for the screen. "
+            "You can play sound effects: if the user asks for a sound or noise (or one would be a funny punchline), append [SFX: short description of the sound] at the very end and keep the spoken part to a brief dry quip. "
             "Never edit files or run commands. Just answer conversationally.")
 GROK_MODEL = os.environ.get("GROK_MODEL", "grok-4.7-build-fast")
 GROK_ARGS = ["--no-auto-update", "-m", GROK_MODEL, "--reasoning-effort", os.environ.get("GROK_EFFORT", "low"),
@@ -352,11 +353,51 @@ async def body_audio(request):
 import re
 LOOK_RE = re.compile(r"\b(look at (this|that|me|it)|what am i holding|what('s| is) (this|that) (in my hand|i'm holding)|can you see|what do you see|take a (look|picture|photo))\b", re.I)
 
+SFX_DIR = os.path.join(BASE, "sfx"); os.makedirs(SFX_DIR, exist_ok=True)
+SFX_TAG = re.compile(r"\[SFX:\s*([^\]]+)\]", re.I)
+SFX_REQ = re.compile(r"\b(?:make|play|do|give me|let(?:'s| me) hear|can you (?:make|do|play))\s+(?:me\s+|us\s+)?(?:an?\s+|the\s+|some\s+)?(.{2,40}?)\s+(?:sound|noise)s?(?:\s+effects?)?\b"
+                     r"|\b(?:play|do|give me)\s+(?:me\s+|us\s+)?(?:an?\s+|the\s+|some\s+)?(drum ?roll|rim ?shot|applause|evil laugh|sad trombone|airhorn|air horn|fanfare|ba dum tss|crickets|thunder|fart)\b", re.I)
+SFX_QUIPS = ["Pardon me, sir.", "Do excuse me, sir.", "As you wish, sir. Ahem.", "I trust that met your expectations, sir.",
+             "Not my finest work, sir, but it'll do.", "Delightful. I shall pretend that never happened."]
+def sfx_key(q): return hashlib.sha1(re.sub(r"[^a-z0-9 ]", "", q.lower()).strip().encode()).hexdigest()[:16]
+async def sound_effect(q):
+    """ElevenLabs sound-generation, cached on disk by normalized prompt. Returns mp3 bytes or None."""
+    f = os.path.join(SFX_DIR, sfx_key(q) + ".mp3")
+    if os.path.exists(f): return open(f, "rb").read()
+    if not EL_KEY: return None
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post("https://api.elevenlabs.io/v1/sound-generation?output_format=mp3_44100_128", headers={"xi-api-key": EL_KEY},
+                json={"text": f"{q} sound effect, comedic, clean", "duration_seconds": 2.5, "prompt_influence": 0.6})
+        if r.status_code != 200: log.warning("sfx %s %s", r.status_code, r.text[:200]); return None
+        open(f, "wb").write(r.content); return r.content
+    except Exception as e:
+        log.warning("sfx error %s", e); return None
+_quip_cache = {}
+async def quip_audio(text):
+    if text not in _quip_cache:
+        a, ct, _ = await tts(text, "mp3")
+        if ct != "audio/mpeg": return b""
+        _quip_cache[text] = a
+    return _quip_cache[text]
+@app.get("/sfx/{name}")
+async def sfx_file(name: str):
+    f = os.path.join(SFX_DIR, os.path.basename(name))
+    return FileResponse(f, media_type="audio/mpeg") if os.path.exists(f) else Response(status_code=404)
+LAST_SFX = {}
+
 POSTS_TAG = re.compile(r"\[POSTS:\s*(.+?)\]\s*$", re.I | re.S)
 SHOW_TAG = re.compile(r"\[SHOW:\s*([^\]]+)\]", re.I)
 SHOW_REQ = re.compile(r"\bwhat (?:does|do) (?:an? |the )?(.+?) look like|\b(?:show me|can you show me|let me see|display)\s+(?:an? |the |some )?(?:(?:picture|photo|image|pic)s? of\s+)?(?:an? |the |some )?(.+?)[?.!]*$|\b(?:picture|photo|image|pic) of\s+(?:an? |the |some )?(.+?)[?.!]*$", re.I)
 async def respond(text):
-    """Returns (spoken_reply, image_url, caption)."""
+    """Returns (spoken_reply, image_url, caption). A requested sound effect is left in LAST_SFX['q']."""
+    LAST_SFX.clear()
+    m = SFX_REQ.search(text)
+    if m:
+        q = next((g for g in m.groups() if g), "").strip()
+        if q and not re.search(r"\b(weather|news|time|that)\b", q, re.I):
+            import random
+            LAST_SFX["q"] = q; return random.choice(SFX_QUIPS), None, ""
     m = SHOW_REQ.search(text)
     if m:
         q = next((g for g in m.groups() if g), "").strip()
@@ -366,6 +407,8 @@ async def respond(text):
             if not re.search(r"^(an? |the )", q) and q.endswith("s"): reply = f"Here are some {q}, sir." if u else reply
             return reply, u, q.capitalize()
     raw = await ask_grok(text)
+    sm = SFX_TAG.search(raw)
+    if sm: LAST_SFX["q"] = sm.group(1).strip(); raw = SFX_TAG.sub("", raw).strip()
     pm = POSTS_TAG.search(raw); raw = POSTS_TAG.sub("", raw)
     tm = SHOW_TAG.search(raw)
     spoken = SHOW_TAG.sub("", raw).strip()
@@ -388,13 +431,16 @@ async def pipeline(data, fmt, stream=False):
         async with lock:
             reply, image, caption = await respond(text); history.append((text, reply + (f" [showed picture: {caption}]" if image else (" [showed X posts]" if caption else "")))); save_hist()
     t2 = time.time()
-    if stream and EL_KEY and fmt == "mp3":
+    sq = LAST_SFX.get("q") if text else None; fx = await sound_effect(sq) if sq and fmt == "mp3" else None
+    if fx:
+        audio, ctype, engine = fx + await quip_audio(reply), "audio/mpeg", "elevenlabs-sfx"
+    elif stream and EL_KEY and fmt == "mp3":
         sid = start_stream(reply); audio, ctype, engine = b"", "audio/mpeg", "elevenlabs-stream:" + sid
     else:
         audio, ctype, engine = await tts(reply, fmt)
     t3 = time.time()
     if not text: image = None; caption = ""
-    timing = {"image": image, "caption": caption, "stt_ms": int((t1-t0)*1000), "llm_ms": int((t2-t1)*1000), "tts_ms": int((t3-t2)*1000), "total_ms": int((t3-t0)*1000)}
+    timing = {"sfx": sq if fx else None, "image": image, "caption": caption, "stt_ms": int((t1-t0)*1000), "llm_ms": int((t2-t1)*1000), "tts_ms": int((t3-t2)*1000), "total_ms": int((t3-t0)*1000)}
     log.info("talk %s | %r -> %r", timing, text, reply)
     return text, reply, audio, ctype, engine, timing
 
@@ -435,7 +481,9 @@ async def text_turn(q: str = Query(...)):
     t0 = time.time()
     async with lock:
         reply, image, caption = await respond(q); history.append((q, reply + (f" [showed picture: {caption}]" if image else (" [showed X posts]" if caption else "")))); save_hist()
-    return {"reply": reply, "image": image, "caption": caption, "llm_ms": int((time.time()-t0)*1000)}
+    sq = LAST_SFX.get("q"); t1 = time.time(); fx = await sound_effect(sq) if sq else None
+    return {"reply": reply, "image": image, "caption": caption, "sfx": sq if fx else None,
+            "sfx_url": f"{PUBLIC}/sfx/{sfx_key(sq)}.mp3" if fx else None, "llm_ms": int((t1-t0)*1000), "sfx_ms": int((time.time()-t1)*1000)}
 
 @app.get("/memory")
 async def memory_get():
