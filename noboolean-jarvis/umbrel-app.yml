@@ -3,10 +3,10 @@ id: noboolean-jarvis
 category: automation
 name: Jarvis (2G)
 icon: "https://raw.githubusercontent.com/noboolean/umbrel-community-app-store/main/noboolean-jarvis/icon.svg"
-version: "1.0.0-nb.4"
+version: "1.0.0-nb.5"
 tagline: Voice assistant server for the Echo Show 5 (Grok + ElevenLabs)
 description: |-
-  JARVIS voice server used by the HOME/JARVIS app on Rob's Echo Show 5.
+  JARVIS voice server used by the HOME/JARVIS app on an Echo Show.
   - Speech-to-text with faster-whisper, answers by the Grok CLI (subscription auth) with web + X search
   - ElevenLabs "Daniel" voice (Piper fallback)
   - Long-term memory (memory.md), persistent short-term history, images and X post cards on screen
@@ -25,4 +25,4 @@ deterministicPassword: false
 torOnly: false
 submitter: noboolean
 submission: ""
-releaseNotes: "Initial packaging of the grok-voice systemd service as an Umbrel app."
+releaseNotes: "nb.5: no personal info in the repo (name/timezone/URL from data/.env, location from data/memory.md); warm persistent grok agent (ACP) with grok -p fallback; streaming ElevenLabs TTS."
