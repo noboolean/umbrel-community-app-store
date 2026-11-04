@@ -645,6 +645,57 @@ async def define_card(text):
     if ex: paras.append((f"“{ex}”", (144, 164, 174)))
     name = await asyncio.to_thread(render_doc, e.get("word", word), pron, paras, "Dictionary · dictionaryapi.dev (Wiktionary)")
     return f"[EMO:neutral] {word.capitalize()}, as a {first[0]}: {first[1]}", f"{PUBLIC}/img/{name}", word.capitalize()
+import ast as _ast, operator as _op
+_OPS = {_ast.Add: _op.add, _ast.Sub: _op.sub, _ast.Mult: _op.mul, _ast.Div: _op.truediv, _ast.Pow: _op.pow, _ast.USub: _op.neg, _ast.UAdd: _op.pos, _ast.Mod: _op.mod}
+def _safe_eval(e):
+    def ev(n):
+        if isinstance(n, _ast.Expression): return ev(n.body)
+        if isinstance(n, _ast.Constant) and isinstance(n.value, (int, float)): return n.value
+        if isinstance(n, _ast.BinOp) and type(n.op) in _OPS:
+            a, b = ev(n.left), ev(n.right)
+            if isinstance(n.op, _ast.Pow) and abs(b) > 12: raise ValueError("pow")
+            return _OPS[type(n.op)](a, b)
+        if isinstance(n, _ast.UnaryOp) and type(n.op) in _OPS: return _OPS[type(n.op)](ev(n.operand))
+        if isinstance(n, _ast.Call) and getattr(n.func, "id", "") == "sqrt" and len(n.args) == 1: return ev(n.args[0]) ** 0.5
+        raise ValueError("bad")
+    return ev(_ast.parse(e, mode="eval"))
+def _fmt(v):
+    if isinstance(v, float) and abs(v - round(v)) < 1e-9: v = int(round(v))
+    return f"{v:,}" if isinstance(v, int) else f"{v:,.6f}".rstrip("0").rstrip(".")
+_MATH_SUBS = [(r"(\d)\s*,\s*(?=\d{3}\b)", r"\1"), (r"\bmultiplied by\b|\btimes\b|×|∗|\*|(?<=\d)\s*x\s*(?=[\d(])|(?<=\d)\s*[xX]\b", " * "), (r"\bdivided by\b|÷|\bover\b", " / "), (r"\bplus\b|\band\b(?=\s*\d)", " + "), (r"\bminus\b|−|–", " - "),
+              (r"\bsquared\b", " ** 2"), (r"\bcubed\b", " ** 3"), (r"\bto the power of\b|\^", " ** "), (r"\bmod(?:ulo)?\b", " % ")]
+MATH_HINT = re.compile(r"\d\s*(?:x|×|\*|\+|-|−|/|÷|\^|%)\s*\d|\d\s*(?:%|percent)\s*of\s*\d|\b(?:times|multiplied by|divided by|plus|minus|squared|cubed|to the power of|square root of)\b", re.I)
+def math_card_parts(text):
+    """Deterministic maths: returns (title, steps) or None."""
+    t = text.lower().replace("what's", "what is")
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:%|percent)\s*of\s*(\d+(?:\.\d+)?)", t)
+    if m:
+        a, b = float(m.group(1)), float(m.group(2)); r = a / 100 * b
+        return f"{_fmt(a)}% of {_fmt(b)}", [f"{_fmt(a)}% = {_fmt(a/100)}", f"{_fmt(a/100)} × {_fmt(b)} = {_fmt(r)}", f"= {_fmt(r)}"]
+    m = re.search(r"square root of\s*(\d+(?:\.\d+)?)", t)
+    if m:
+        a = float(m.group(1)); return f"√{_fmt(a)}", [f"√{_fmt(a)} = {_fmt(a ** 0.5)}"]
+    if not MATH_HINT.search(t): return None
+    e = t
+    for a, b in _MATH_SUBS: e = re.sub(a, b, e)
+    cands = re.findall(r"[\d\.\s\+\-\*/%\(\)]+", e)
+    cands = [c.strip() for c in cands if re.search(r"\d", c) and re.search(r"\d\s*(?:\*\*|[\+\-\*/%])\s*[\d(]", c.strip())]
+    if not cands: return None
+    ex = re.sub(r"(\d)\.(?!\d)", r"\1", max(cands, key=len)).strip().rstrip("+-*/%. ")
+    try: v = _safe_eval(ex)
+    except Exception: return None
+    pretty = re.sub(r"\s+", " ", ex.replace("**", "^").replace("*", "×").replace("/", "÷").replace("-", "−")).strip()
+    pretty = re.sub(r"\s*([×÷+−^%])\s*", r" \1 ", pretty).replace(" ^ 2", "²").replace(" ^ 3", "³").strip()
+    pretty = re.sub(r"(\d{4,})", lambda m: _fmt(int(m.group(1))), pretty)
+    return pretty, [f"{pretty} = {_fmt(v)}"]
+async def math_card(text):
+    got = math_card_parts(text)
+    if not got: return None
+    title, lines = got
+    name = await asyncio.to_thread(render_card, title, lines)
+    res = lines[-1].split("=")[-1].strip()
+    spoken = f"[EMO:smug] {title.replace('×', 'times').replace('÷', 'divided by').replace('−', 'minus').replace('²', ' squared').replace('³', ' cubed').replace('√', 'the square root of ')} is {res}, sir. It's on screen."
+    return spoken, f"{PUBLIC}/img/{name}", title
 async def card_from(body):
     parts = [x.strip() for x in body.split("||") if x.strip()]
     if not parts: return None, ""
@@ -678,6 +729,17 @@ async def _respond(text):
     if HOME_LATLON and WX_SHOW.search(text) and not wx_elsewhere(text):
         try: return await weather_card()
         except Exception as e: log.warning("weather card: %s", e)
+    if FOLLOW_SHOW.search(text) and history:
+        for prev_q, _r in reversed(list(history)[-3:]):
+            if math_card_parts(prev_q):
+                got = await math_card(prev_q)
+                if got: return got
+                break
+    if (re.search(r"\b(show|display|let me see|put)\b", text, re.I) or re.match(r"^\W*(?:what(?:'s| is)|calculate|compute|how much is)\b", text, re.I)) and not WX_RE.search(text):
+        try:
+            got = await math_card(text)
+            if got and re.search(r"\b(show|display|let me see|put|calculate)\b", text, re.I): return got
+        except Exception as e: log.warning("math card: %s", e)
     for fn in (bible_card, define_card):
         try:
             got = await fn(text)

@@ -3,7 +3,7 @@ id: noboolean-jarvis
 category: automation
 name: Jarvis (2G)
 icon: "https://raw.githubusercontent.com/noboolean/umbrel-community-app-store/main/noboolean-jarvis/icon.svg"
-version: "1.0.0-nb.12"
+version: "1.0.0-nb.13"
 tagline: Voice assistant server for the Echo Show 5 (Grok + ElevenLabs)
 description: |-
   JARVIS voice server used by the HOME/JARVIS app on an Echo Show.
@@ -25,4 +25,4 @@ deterministicPassword: false
 torOnly: false
 submitter: noboolean
 submission: ""
-releaseNotes: "nb.12: [CARD:] maths/text cards for show-me follow-ups, KJV scripture cards (bible-api.com), dictionary cards (dictionaryapi.dev), DejaVu font, full-screen 960x440 cards; nb.11: weather routing fix; nb.10: /wx_now rain probe, weather card restyled to match the app card; nb.9: [EMO:x] emotion tag from Grok (stripped from speech, sent as X-Emotion); nb.8: lip-sync visemes, weather card, /preview."
+releaseNotes: "nb.13: deterministic server-side maths cards (safe eval) for any show-me with a maths expression and show-me follow-ups; nb.12: [CARD:] maths/text cards for show-me follow-ups, KJV scripture cards (bible-api.com), dictionary cards (dictionaryapi.dev), DejaVu font, full-screen 960x440 cards; nb.11: weather routing fix; nb.10: /wx_now rain probe, weather card restyled to match the app card; nb.9: [EMO:x] emotion tag from Grok (stripped from speech, sent as X-Emotion); nb.8: lip-sync visemes, weather card, /preview."
