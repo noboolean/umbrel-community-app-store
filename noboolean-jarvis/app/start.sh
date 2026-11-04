@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 cd /data
+# secrets (ELEVENLABS_API_KEY, EL_VOICE_ID) live only in app-data, never in the repo
+if [ -f /data/.env ]; then set -a; . /data/.env; set +a; fi
 mkdir -p home/.grok img voices npm hf
 export NPM_CONFIG_PREFIX=/data/npm PATH=/data/npm/bin:$PATH HF_HOME=/data/hf
 if [ ! -x /data/venv/bin/uvicorn ]; then
