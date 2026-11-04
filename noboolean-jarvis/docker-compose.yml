@@ -1,0 +1,19 @@
+version: "3.7"
+
+services:
+  server:
+    # stock multi-arch image with Python 3.13 + Node 22; code and deps live in app-data so no custom image build is needed
+    image: nikolaik/python-nodejs:python3.13-nodejs22-slim
+    restart: on-failure
+    network_mode: host          # keeps http://<pi>:8765 exactly as the Echo Show app expects
+    user: "1000:1000"
+    working_dir: /data
+    environment:
+      HOME: /data/home          # grok CLI reads ~/.grok (auth.json from device-auth) from here
+      PUBLIC_URL: http://192.168.0.75:8765
+    env_file:
+      - ${APP_DATA_DIR}/data/.env   # ELEVENLABS_API_KEY, EL_VOICE_ID
+    entrypoint: ["bash", "/app/start.sh"]
+    volumes:
+      - ${APP_DATA_DIR}/data:/data            # memory.md, history.json, img cache, venv, npm, models, .grok auth
+      - ${APP_DATA_DIR}/app:/app:ro           # server.py, start.sh, requirements.txt
