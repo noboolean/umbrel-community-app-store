@@ -386,6 +386,84 @@ async def sfx_file(name: str):
     return FileResponse(f, media_type="audio/mpeg") if os.path.exists(f) else Response(status_code=404)
 LAST_SFX = {}
 
+
+# ---------------- weather card (server-rendered PNG, shown via /img like pictures) ----------------
+WX_SHOW = re.compile(r"\b(show|display|pull up|let me see)\b.*\b(weather|forecast)\b|\bweather (card|forecast)\b|^\W*(what'?s|how'?s) the (weather|forecast)\b|\b(weather|forecast) (today|this week|for the week)\b", re.I)
+async def wx_data():
+    lat, lon = [x.strip() for x in HOME_LATLON.split(",")]
+    async with httpx.AsyncClient(timeout=6) as c:
+        return (await c.get("https://api.open-meteo.com/v1/forecast", params={"latitude": lat, "longitude": lon, "timezone": "auto",
+            "temperature_unit": os.environ.get("WEATHER_UNITS", "fahrenheit"), "wind_speed_unit": "mph",
+            "current": "temperature_2m,apparent_temperature,weather_code,wind_speed_10m,is_day",
+            "hourly": "temperature_2m,weather_code,precipitation_probability",
+            "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code", "forecast_days": 6})).json()
+def _wx_icon(d, code, cx, cy, s, day=True):
+    from PIL import ImageDraw
+    sun = (255, 196, 40); cloud = (200, 210, 222); dark = (130, 140, 155)
+    def cl(x, y, k, col):
+        d.ellipse([x-0.55*k, y-0.15*k, x-0.05*k, y+0.35*k], fill=col); d.ellipse([x-0.3*k, y-0.45*k, x+0.3*k, y+0.2*k], fill=col)
+        d.ellipse([x+0.0*k, y-0.2*k, x+0.6*k, y+0.35*k], fill=col); d.rectangle([x-0.3*k, y+0.05*k, x+0.35*k, y+0.35*k], fill=col)
+    def sn(x, y, k):
+        import math
+        for a in range(0, 360, 45):
+            r = math.radians(a); d.line([x+math.cos(r)*k*0.42, y+math.sin(r)*k*0.42, x+math.cos(r)*k*0.6, y+math.sin(r)*k*0.6], fill=sun, width=max(2, int(k/14)))
+        d.ellipse([x-0.32*k, y-0.32*k, x+0.32*k, y+0.32*k], fill=sun if day else (220, 225, 240))
+    if code in (0, 1): sn(cx, cy, s); return
+    if code == 2: sn(cx-0.2*s, cy-0.2*s, s*0.8); cl(cx+0.05*s, cy+0.1*s, s*0.85, cloud); return
+    if code in (45, 48):
+        for i in range(4): d.line([cx-0.5*s, cy-0.3*s+i*0.2*s, cx+0.5*s, cy-0.3*s+i*0.2*s], fill=cloud, width=max(2, int(s/10)))
+        return
+    cl(cx, cy-0.1*s, s, dark if code >= 61 else cloud)
+    if 51 <= code <= 67 or 80 <= code <= 82:
+        for i in range(3): d.line([cx-0.3*s+i*0.3*s, cy+0.35*s, cx-0.4*s+i*0.3*s, cy+0.6*s], fill=(80, 170, 255), width=max(2, int(s/12)))
+    elif 71 <= code <= 77 or code in (85, 86):
+        for i in range(3): x = cx-0.3*s+i*0.3*s; d.ellipse([x-0.06*s, cy+0.42*s, x+0.06*s, cy+0.54*s], fill=(240, 245, 255))
+    elif code >= 95: d.polygon([(cx+0.05*s, cy+0.2*s), (cx-0.15*s, cy+0.5*s), (cx, cy+0.5*s), (cx-0.1*s, cy+0.75*s), (cx+0.2*s, cy+0.4*s), (cx+0.05*s, cy+0.4*s)], fill=sun)
+def render_weather(j):
+    from PIL import Image, ImageDraw, ImageFont
+    import datetime
+    W, H = 960, 424
+    im = Image.new("RGB", (W, H), (6, 12, 18)); d = ImageDraw.Draw(im)
+    F = lambda n: ImageFont.load_default(n)
+    acc = (0, 229, 255); gr = (144, 164, 174); wh = (255, 255, 255)
+    cu, hr, dy = j["current"], j["hourly"], j["daily"]
+    d.rounded_rectangle([12, 10, W-12, 238], 22, fill=(12, 26, 36))
+    _wx_icon(d, cu["weather_code"], 100, 110, 120, cu.get("is_day", 1) == 1)
+    d.text((185, 30), f"{round(cu['temperature_2m'])}°", font=F(96), fill=wh)
+    d.text((190, 140), WMO.get(cu["weather_code"], "").capitalize(), font=F(28), fill=acc)
+    d.text((190, 178), f"H {round(dy['temperature_2m_max'][0])}°  L {round(dy['temperature_2m_min'][0])}°   Rain {dy['precipitation_probability_max'][0]}%", font=F(22), fill=gr)
+    d.text((190, 206), f"Feels {round(cu['apparent_temperature'])}°  ·  Wind {round(cu['wind_speed_10m'])} mph", font=F(18), fill=gr)
+    # hourly strip: rest of today (up to 8 slots, every 2h)
+    now = cu["time"][:13]; idx = next((i for i, t in enumerate(hr["time"]) if t[:13] >= now), 0)
+    today = cu["time"][:10]; slots = [i for i in range(idx+1, len(hr["time"]), 2) if hr["time"][i][:10] == today][:6]
+    if len(slots) < 3: slots = list(range(idx+1, idx+13, 2))[:6]
+    x0, w = 470, (W-24-470) / max(1, len(slots))
+    for k, i in enumerate(slots):
+        x = x0 + k*w + w/2; hh = int(hr["time"][i][11:13]); lab = f"{(hh % 12) or 12}{'a' if hh < 12 else 'p'}"
+        d.text((x, 40), lab, font=F(18), fill=gr, anchor="mm"); _wx_icon(d, hr["weather_code"][i], x, 92, 42, 7 <= hh < 18)
+        d.text((x, 150), f"{round(hr['temperature_2m'][i])}°", font=F(24), fill=wh, anchor="mm")
+        d.text((x, 182), f"{hr['precipitation_probability'][i] or 0}%", font=F(16), fill=(80, 170, 255), anchor="mm")
+    # 5-day row
+    cw = (W-24-4*10) / 5
+    for k in range(1, 6):
+        x = 12 + (k-1)*(cw+10); d.rounded_rectangle([x, 250, x+cw, H-6], 18, fill=(12, 26, 36)); m = x + cw/2
+        dn = datetime.date.fromisoformat(dy["time"][k]).strftime("%a")
+        d.text((m, 272), dn, font=F(22), fill=acc, anchor="mm"); _wx_icon(d, dy["weather_code"][k], m, 318, 48)
+        d.text((m, 370), f"{round(dy['temperature_2m_max'][k])}° / {round(dy['temperature_2m_min'][k])}°", font=F(22), fill=wh, anchor="mm")
+        d.text((m, 398), f"Rain {dy['precipitation_probability_max'][k]}%", font=F(16), fill=(80, 170, 255), anchor="mm")
+    name = f"wx_{int(time.time())}.png"; im.save(os.path.join(IMG_DIR, name))
+    for old in os.listdir(IMG_DIR):
+        if old.startswith("wx_") and old != name: 
+            try: os.remove(os.path.join(IMG_DIR, old))
+            except Exception: pass
+    return name
+async def weather_card():
+    j = await wx_data(); name = await asyncio.to_thread(render_weather, j)
+    cu, dy = j["current"], j["daily"]
+    spoken = (f"Currently {round(cu['temperature_2m'])} degrees and {WMO.get(cu['weather_code'], 'unremarkable')}, sir, "
+              f"with a high of {round(dy['temperature_2m_max'][0])}. The week ahead is on screen.")
+    return spoken, f"{PUBLIC}/img/{name}", f"{HOME_PLACE} weather"
+
 POSTS_TAG = re.compile(r"\[POSTS:\s*(.+?)\]\s*$", re.I | re.S)
 SHOW_TAG = re.compile(r"\[SHOW:\s*([^\]]+)\]", re.I)
 SHOW_REQ = re.compile(r"\bwhat (?:does|do) (?:an? |the )?(.+?) look like|\b(?:show me|can you show me|let me see|display)\s+(?:an? |the |some )?(?:(?:picture|photo|image|pic)s? of\s+)?(?:an? |the |some )?(.+?)[?.!]*$|\b(?:picture|photo|image|pic) of\s+(?:an? |the |some )?(.+?)[?.!]*$", re.I)
@@ -398,6 +476,9 @@ async def respond(text):
         if q and not re.search(r"\b(weather|news|time|that)\b", q, re.I):
             import random
             LAST_SFX["q"] = q; return random.choice(SFX_QUIPS), None, ""
+    if HOME_LATLON and WX_SHOW.search(text):
+        try: return await weather_card()
+        except Exception as e: log.warning("weather card: %s", e)
     m = SHOW_REQ.search(text)
     if m:
         q = next((g for g in m.groups() if g), "").strip()
