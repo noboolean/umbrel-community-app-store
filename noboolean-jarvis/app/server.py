@@ -688,7 +688,207 @@ def math_card_parts(text):
     pretty = re.sub(r"\s*([×÷+−^%])\s*", r" \1 ", pretty).replace(" ^ 2", "²").replace(" ^ 3", "³").strip()
     pretty = re.sub(r"(\d{4,})", lambda m: _fmt(int(m.group(1))), pretty)
     return pretty, [f"{pretty} = {_fmt(v)}"]
+# ---------------- teacher-style worked maths (deterministic) ----------------
+def _ff(name, n):
+    from PIL import ImageFont
+    k = (name, n)
+    if k not in _FONTS:
+        f = next((x for x in (os.path.join(BASE, "fonts", name), "/app/fonts/" + name, "/usr/share/fonts/truetype/dejavu/" + name) if os.path.exists(x)), None)
+        _FONTS[k] = ImageFont.truetype(f, n) if f else ImageFont.load_default(n)
+    return _FONTS[k]
+def _c(n): return f"{n:,}"
+def teach_mul(a, b):
+    za = len(str(a)) - len(str(a).rstrip("0")); zb = len(str(b)) - len(str(b).rstrip("0"))
+    grid, steps, say = [], [], []
+    if a % 10 == 0 and b % 10 == 0 and (a // 10**za) < 100 and (b // 10**zb) < 100 and za + zb >= 1:
+        ca, cb = a // 10**za, b // 10**zb; core = ca * cb; z = za + zb
+        steps = [f"Set the zeros aside: {_c(a)} has {za}, {_c(b)} has {zb} — {z} zero{'s' if z > 1 else ''} in total.",
+                 f"Multiply what's left: {ca} × {cb} = {core}.",
+                 f"Put the {z} zero{'s' if z > 1 else ''} back on the end: {core} → {_c(a*b)}."]
+        grid = [("", str(ca) + " " * 0, "num"), ("×", str(cb), "num"), ("", "", "line"), ("", str(core), "num"), ("+ zeros", "0" * z, "carry"), ("", "", "line"), ("", str(a * b), "result")]
+        say = [f"Drop the zeros and do {ca} times {cb}, that's {core}", f"then tack the {z} zeros back on"]
+        return grid, steps, say
+    if b > a and len(str(b)) > len(str(a)): a, b = b, a
+    db = str(b)[::-1]; parts = []
+    for i, d in enumerate(db):
+        d = int(d); p = a * d
+        carries, cr = [], 0
+        for ch in str(a)[::-1]:
+            v = int(ch) * d + cr; cr = v // 10; carries.append(cr)
+        place = ["ones", "tens", "hundreds", "thousands"][i] if i < 4 else f"10^{i}"
+        parts.append(p * 10**i)
+        cs = "".join(str(x) if x else " " for x in carries[:-1][::-1])
+        steps.append(f"{_c(a)} × {d} ({place}) = {_c(p)}" + (f", then add {i} zero{'s' if i > 1 else ''} → {_c(p * 10**i)}" if i else "") + (f".  Carries: {', '.join(str(x) for x in carries[:-1] if x)}" if any(carries[:-1]) else "."))
+        if i == 0: grid.append(("carry", cs + " ", "carry"))
+    grid += [("", str(a), "num"), ("×", str(b), "num"), ("", "", "line")]
+    for k, p in enumerate(parts): grid.append(("+" if k == len(parts) - 1 and len(parts) > 1 else "", str(p), "num"))
+    if len(parts) > 1:
+        grid += [("", "", "line"), ("", str(a * b), "result")]
+        steps.append(f"Add the partial products: {' + '.join(_c(p) for p in parts)} = {_c(a*b)}.")
+        say = [f"{_c(a)} times {db[0]} is {_c(parts[0])}"] + [f"times {db[i]} {['', 'tens', 'hundreds', 'thousands'][i] if i < 4 else ''} is {_c(parts[i])}" for i in range(1, min(len(parts), 3))] + [f"add them up for {_c(a*b)}"]
+    else:
+        grid[-1:] = [("", "", "line"), ("", str(a * b), "result")]; grid = [g for g in grid if g[1] != str(parts[0]) or g[2] != "num"] if False else grid
+        say = [f"{_c(a)} times {b} is {_c(a*b)}"]
+    return grid, steps, say
+def teach_add(a, b, sub=False):
+    if sub and b > a: a, b = b, a; flip = True
+    else: flip = False
+    sa, sb = str(a), str(b); n = max(len(sa), len(sb)); A, B = sa.zfill(n), sb.zfill(n)
+    marks, steps, cr = [" "] * n, [], 0
+    for i in range(n - 1, -1, -1):
+        x, y = int(A[i]), int(B[i]); col = ["ones", "tens", "hundreds", "thousands", "ten-thousands"][n - 1 - i] if n - 1 - i < 5 else "next"
+        if not sub:
+            v = x + y + cr
+            steps.append(f"{col.capitalize()}: {x} + {y}" + (f" + {cr} carried" if cr else "") + f" = {v}" + (f" → write {v % 10}, carry 1." if v >= 10 else "."))
+            cr = v // 10
+            if cr and i: marks[i - 1] = "1"
+        else:
+            o = x; lent = cr; x -= cr; cr = 0
+            base = f"{o} (lent 1, now {x})" if lent else f"{o}"
+            if lent and o == 0: steps.append(f"{col.capitalize()}: 0 has nothing to lend, so it borrows 10 from the left → 10 − 1 lent = 9, then 9 − {y} = {9 - y}."); cr = 1; marks[i - 1] = "b" if i else " "; continue
+            if x < y: steps.append(f"{col.capitalize()}: {base} is too small for {y}, so borrow 10 from the left → {x + 10} − {y} = {x + 10 - y}."); cr = 1; marks[i - 1] = "b" if i else " "
+            else: steps.append(f"{col.capitalize()}: {base} − {y} = {x - y}.")
+    if not sub and cr: steps.append("Carry the last 1 to the front.")
+    r = a - b if sub else a + b
+    grid = [("carry" if not sub else "borrow", " " + "".join(marks).replace("b", "·"), "carry"), ("", sa, "num"), ("−" if sub else "+", sb, "num"), ("", "", "line"), ("", str(r), "result")]
+    if len(steps) > 5: steps = [s for s in steps if "carry" in s or "borrow" in s][:4] or steps[:4]; steps.insert(0, "Line up the columns and work right to left.")
+    say = ["line them up and work right to left", ("carrying where a column passes nine" if not sub else "borrowing where needed"), f"for {_c(r)}"]
+    if flip: r = -r; steps.append(f"The second number was bigger, so the answer is negative: {_c(r)}.")
+    return grid, steps, say
+def teach_div(a, b):
+    q, rem = divmod(a, b); s = str(a); steps, rows, cur, started, col = [], [], 0, False, 0
+    for i, ch in enumerate(s):
+        cur = cur * 10 + int(ch)
+        if cur < b and not started: continue
+        started = True; d = cur // b; sub = d * b
+        steps.append(f"{_c(b)} into {cur} goes {d} time{'s' if d != 1 else ''} ({d} × {b} = {sub}); {cur} − {sub} = {cur - sub}" + ("; bring down the " + s[i+1] + "." if i + 1 < len(s) else "."))
+        rows.append((i, cur, sub)); cur -= sub
+    steps.append(f"Answer: {_c(q)}" + (f" remainder {rem}" if rem else " exactly, no remainder") + ".")
+    if rem: steps.append(f"As a decimal: {a/b:,.4f}".rstrip("0").rstrip(".") + ".")
+    # render rows as long-division text (right-aligned to column index i)
+    L = len(str(b)) + 1
+    lines = [(" " * (L + 1) + str(q).rjust(len(s)), "result"), (" " * (L + 1) + "─" * len(s), "line_t"), (f"{b}) {s}", "num")]
+    for k, (i, c, sb) in enumerate(rows):
+        w = i + 1
+        lines.append((" " * (L + 1) + ("−" + str(sb)).rjust(w), "dim"))
+        nxt = c - sb
+        if k + 1 < len(rows): nc = rows[k + 1][1]; lines.append((" " * (L + 1) + str(nc).rjust(rows[k + 1][0] + 1), "num"))
+        else: lines.append((" " * (L + 1) + str(nxt).rjust(w) + (" ← r" if nxt else ""), "carry"))
+    say = [f"{b} goes into {a} {q} times" + (f" with {rem} left over" if rem else " exactly")]
+    return lines, steps[:6], say
+def teach_parts(text):
+    """Returns (title, grid_or_lines, kind, steps, answer, say) or None."""
+    t = text.lower().replace(",", "").replace("what's", "what is")
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:%|percent)\s*of\s*(\d+(?:\.\d+)?)", t)
+    if m:
+        a, b = float(m.group(1)), float(m.group(2)); r = a / 100 * b
+        steps = [f"Percent means “out of 100”, so {_fmt(a)}% = {_fmt(a)} ÷ 100 = {_fmt(a/100)}.", f"“Of” means multiply: {_fmt(a/100)} × {_fmt(b)} = {_fmt(r)}."]
+        if a in (10, 20, 25, 50, 5, 15): steps.append(f"Shortcut: 10% of {_fmt(b)} is {_fmt(b/10)}" + (f", half of that is {_fmt(b/20)}, together {_fmt(r)}." if a == 15 else f", so {_fmt(a)}% is {_fmt(r)}."))
+        grid = [(f"{_fmt(a)}%", f"= {_fmt(a/100)}", "num"), ("×", _fmt(b), "num"), ("", "", "line"), ("", _fmt(r), "result")]
+        return f"{_fmt(a)}% of {_fmt(b)}", grid, "grid", steps, _fmt(r), [f"{_fmt(a)} percent is {_fmt(a/100)}", f"times {_fmt(b)} gives {_fmt(r)}"]
+    m = re.search(r"square root of\s*(\d+(?:\.\d+)?)|√\s*(\d+)", t)
+    if m:
+        a = float(m.group(1) or m.group(2)); r = a ** 0.5; ri = round(r)
+        if ri * ri == a:
+            steps = [f"Find the number that times itself makes {_fmt(a)}.", f"Try {ri - 1}: {ri-1} × {ri-1} = {(ri-1)**2} — too small.", f"Try {ri}: {ri} × {ri} = {_fmt(a)} ✓", f"So √{_fmt(a)} = {ri}."]
+            say = [f"we need a number times itself to make {_fmt(a)}", f"{ri} times {ri} is {_fmt(a)}"]
+        else:
+            lo = int(r); steps = [f"{lo}² = {lo*lo} and {lo+1}² = {(lo+1)**2}, so the root is between {lo} and {lo+1}.", f"Closer to {lo if r - lo < 0.5 else lo + 1}; a calculator gives {r:.4f}."]
+            say = [f"it sits between {lo} and {lo+1}", f"about {r:.2f}"]
+        return f"√{_fmt(a)}", [("√", _fmt(a), "num"), ("", "", "line"), ("", _fmt(r if ri*ri != a else ri), "result")], "grid", steps, _fmt(round(r, 4)), say
+    if not MATH_HINT.search(t): return None
+    e = t
+    for x, y in _MATH_SUBS: e = re.sub(x, y, e)
+    e = re.sub(r"(\d)\.(?!\d)", r"\1", e)
+    m = re.search(r"(\d+)\s*(\*\*|\*|/|\+|-)\s*(\d+)\b(?!\s*(?:\*\*|[\*/\+\-]))", e)
+    if not m or len(re.findall(r"\d+", e)) > 2: return None
+    a, op, b = int(m.group(1)), m.group(2), int(m.group(3))
+    if op == "*": g, s, say = teach_mul(a, b); return f"{_c(a)} × {_c(b)}", g, "grid", s, _c(a * b), say
+    if op == "+": g, s, say = teach_add(a, b); return f"{_c(a)} + {_c(b)}", g, "grid", s, _c(a + b), say
+    if op == "-": g, s, say = teach_add(a, b, True); return f"{_c(a)} − {_c(b)}", g, "grid", s, _c(a - b), say
+    if op == "/" and b:
+        L, s, say = teach_div(a, b); q, r = divmod(a, b)
+        return f"{_c(a)} ÷ {_c(b)}", L, "lines", s, _c(q) + (f" r {r}" if r else ""), say
+    if op == "**" and b <= 6:
+        steps = [f"{a}^{b} means {a} multiplied by itself {b} times: " + " × ".join([str(a)] * b) + "."]
+        v = a
+        for k in range(2, b + 1): steps.append(f"{_c(v)} × {a} = {_c(v * a)}"); v *= a
+        sup = {2: "²", 3: "³"}.get(b, f"^{b}")
+        return f"{a}{sup}", [("", " × ".join([str(a)] * b), "num"), ("", "", "line"), ("", str(a ** b), "result")], "grid", steps[:6], _c(a ** b), [f"{a} times itself {b} times", f"makes {_c(a**b)}"]
+    return None
+def render_teach(title, layout, kind, steps, answer):
+    from PIL import Image, ImageDraw
+    import textwrap
+    W, H = 960, 440
+    im = Image.new("RGB", (W, H), (11, 15, 20)); d = ImageDraw.Draw(im)
+    acc = (0, 229, 255); gr = (144, 164, 174); wh = (255, 255, 255); dim = (110, 130, 140); amber = (255, 196, 64)
+    d.rounded_rectangle([12, 10, W-12, H-10], 16, fill=(15, 23, 31), outline=(0, 78, 90), width=1)
+    d.text((36, 22), title, font=_ff("DejaVuSans-Bold.ttf", 30), fill=acc)
+    d.text((W-36, 30), "WORKED SOLUTION", font=_ff("DejaVuSans.ttf", 15), fill=dim, anchor="ra")
+    d.line([36, 66, W-36, 66], fill=(0, 60, 70), width=1)
+    LW = 380; d.rounded_rectangle([28, 80, LW, H-76], 12, fill=(11, 18, 25))
+    if kind == "grid":
+        rows = len(layout); fs = 44 if rows <= 5 else (38 if rows <= 7 else 30)
+        mono = _ff("DejaVuSansMono.ttf", fs); monob = _ff("DejaVuSansMono-Bold.ttf", fs); small = _ff("DejaVuSansMono.ttf", int(fs * 0.55))
+        cw = d.textlength("0", font=mono); widest = max((len(t) for _, t, _ in layout), default=1)
+        xr = min(LW - 40, (28 + LW) / 2 + (widest * cw) / 2 + 10)
+        lh = fs * 1.12; tot = sum(lh * (0.6 if st == "carry" else 0.35 if st == "line" else 1) for _, _, st in layout); y = 80 + max(8, (H - 156 - tot) / 2)
+        for lab, txt, st in layout:
+            if st == "line": d.line([xr - (widest + 1) * cw, y + lh * 0.15, xr, y + lh * 0.15], fill=gr, width=3); y += lh * 0.35; continue
+            if st == "carry":
+                fnt = small; col = amber
+                for k, ch in enumerate(txt[::-1]): d.text((xr - (k + 0.5) * cw, y), ch, font=fnt, fill=col, anchor="ma")
+                if lab and lab not in ("carry", "borrow"): d.text((xr - (len(txt) + 1.5) * cw, y), lab, font=small, fill=dim, anchor="ra")
+                y += lh * 0.6; continue
+            fnt, col = (monob, acc) if st == "result" else (mono, wh)
+            d.text((xr, y), txt, font=fnt, fill=col, anchor="ra")
+            if lab: d.text((xr - (len(txt) + 0.7) * cw, y), lab, font=mono if len(lab) == 1 else small, fill=gr, anchor="ra")
+            y += lh
+    else:
+        n = len(layout); fs = 34 if n <= 6 else (28 if n <= 8 else 22); mono = _ff("DejaVuSansMono.ttf", fs); monob = _ff("DejaVuSansMono-Bold.ttf", fs)
+        cw = d.textlength("0", font=mono); widest = max(len(t) for t, _ in layout); x0 = max(44, (28 + LW) / 2 - widest * cw / 2); y = 92
+        for txt, st in layout:
+            if st == "line_t":
+                k = len(txt) - len(txt.lstrip()); d.line([x0 + (k - 1.2) * cw, y + fs * 0.1, x0 + len(txt) * cw, y + fs * 0.1], fill=gr, width=3)
+                d.line([x0 + (k - 1.2) * cw, y + fs * 0.1, x0 + (k - 1.6) * cw, y + fs * 1.25], fill=gr, width=3); y += fs * 0.3; continue
+            col = {"result": acc, "dim": gr, "carry": amber}.get(st, wh)
+            d.text((x0, y), txt.replace(")", " "), font=monob if st == "result" else mono, fill=col); y += fs * 1.15
+    # numbered steps
+    n = len(steps); fs = 21 if n <= 3 else (19 if n <= 5 else 17); f = _ff("DejaVuSans.ttf", fs); fb = _ff("DejaVuSans-Bold.ttf", fs)
+    x, y, maxw = LW + 30, 84, W - LW - 70
+    for i, s in enumerate(steps):
+        d.ellipse([x, y + 1, x + fs + 8, y + fs + 9], fill=(0, 78, 90)); d.text((x + (fs + 8) / 2, y + (fs + 10) / 2), str(i + 1), font=fb, fill=wh, anchor="mm")
+        words, cur, out = s.split(), "", []
+        for w in words:
+            c2 = (cur + " " + w).strip()
+            if d.textlength(c2, font=f) > maxw - fs - 18 and cur: out.append(cur); cur = w
+            else: cur = c2
+        if cur: out.append(cur)
+        for ln in out[:3]:
+            if y > H - 100: break
+            d.text((x + fs + 18, y + 3), ln, font=f, fill=(220, 228, 232)); y += fs + 7
+        y += 9
+    # answer bar
+    d.rounded_rectangle([28, H-66, W-28, H-20], 12, fill=(0, 52, 62), outline=acc, width=2)
+    d.text((48, H-43), "ANSWER", font=_ff("DejaVuSans-Bold.ttf", 18), fill=acc, anchor="lm")
+    d.text((W-48, H-43), answer, font=_ff("DejaVuSans-Bold.ttf", 32), fill=wh, anchor="rm")
+    name = f"teach_{int(time.time()*1000)}.png"; im.save(os.path.join(IMG_DIR, name))
+    olds = sorted(x for x in os.listdir(IMG_DIR) if x.startswith("teach_"))
+    for old in olds[:-20]:
+        try: os.remove(os.path.join(IMG_DIR, old))
+        except Exception: pass
+    return name
 async def math_card(text):
+    try: tp = teach_parts(text)
+    except Exception as e: log.warning("teach: %s", e); tp = None
+    if tp:
+        title, layout, kind, steps, answer, say = tp
+        name = await asyncio.to_thread(render_teach, title, layout, kind, steps, answer)
+        sp = ", ".join(say); sp = sp[0].upper() + sp[1:]
+        if answer.split(" r ")[0] not in sp: sp += f". That's {answer.replace(' r ', ' remainder ')}"
+        return "[EMO:happy] " + sp + ". It's all on screen, sir.", f"{PUBLIC}/img/{name}", title
+    return await _math_card_simple(text)
+async def _math_card_simple(text):
     got = math_card_parts(text)
     if not got: return None
     title, lines = got
@@ -731,7 +931,7 @@ async def _respond(text):
         except Exception as e: log.warning("weather card: %s", e)
     if FOLLOW_SHOW.search(text) and history:
         for prev_q, _r in reversed(list(history)[-3:]):
-            if math_card_parts(prev_q):
+            if math_card_parts(prev_q) or teach_parts(prev_q):
                 got = await math_card(prev_q)
                 if got: return got
                 break
@@ -761,6 +961,9 @@ async def _respond(text):
     cm = CARD_TAG.search(raw); raw = CARD_TAG.sub("", raw).strip()
     if cm:
         try:
+            if teach_parts(text):
+                _sp, u, title = await math_card(text)
+                return SHOW_TAG.sub("", POSTS_TAG.sub("", SFX_TAG.sub("", raw))).strip(), u, title
             u, title = await card_from(cm.group(1))
             if u: return SHOW_TAG.sub("", POSTS_TAG.sub("", SFX_TAG.sub("", raw))).strip(), u, title
         except Exception as e: log.warning("card: %s", e)
