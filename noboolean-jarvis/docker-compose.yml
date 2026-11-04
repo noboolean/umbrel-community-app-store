@@ -9,6 +9,7 @@ services:
     environment:
       HOME: /data/home          # grok CLI reads ~/.grok (auth.json from device-auth) from here
       PUBLIC_URL: http://192.168.0.75:8765
+      GROK_BIN: /data/npm/bin/grok
     entrypoint: ["bash", "/app/start.sh"]
     volumes:
       - ${APP_DATA_DIR}/data:/data            # memory.md, history.json, img cache, venv, npm, models, .grok auth

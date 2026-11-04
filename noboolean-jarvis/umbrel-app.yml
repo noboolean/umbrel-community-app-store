@@ -3,7 +3,7 @@ id: noboolean-jarvis
 category: automation
 name: Jarvis (2G)
 icon: "https://raw.githubusercontent.com/noboolean/umbrel-community-app-store/main/noboolean-jarvis/icon.svg"
-version: "1.0.0-nb.2"
+version: "1.0.0-nb.3"
 tagline: Voice assistant server for the Echo Show 5 (Grok + ElevenLabs)
 description: |-
   JARVIS voice server used by the HOME/JARVIS app on Rob's Echo Show 5.
