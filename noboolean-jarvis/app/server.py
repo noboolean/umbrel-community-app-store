@@ -21,6 +21,7 @@ PREAMBLE = (f"You are JARVIS, {WHO}'s AI butler, in the spirit of Jarvis from Ir
             "You have a screen. Whenever the user asks about or mentions an animal, place, landmark, famous person, object or what something looks like, "
             "append a tag at the very end like [SHOW: giraffe] with a short Wikipedia-style search query; the device will display it. "
             "Never say you cannot show images. "
+            "Always begin your reply with one emotion tag for your face on screen: [EMO:happy], [EMO:sad], [EMO:mad], [EMO:laughing], [EMO:crying], [EMO:surprised], [EMO:smug] or [EMO:neutral]; pick the one that fits your reply. "
             "For anything about X/Twitter (trending, latest posts, what people are saying), use your X search tool, then summarise the gist in one or two spoken sentences without reading handles aloud, "
             "and append [POSTS: @handle: short text || @handle: short text] with up to 3 top posts for the screen. "
             "You can play sound effects: if the user asks for a sound or noise (or one would be a funny punchline), append [SFX: short description of the sound] at the very end and keep the spoken part to a brief dry quip. "
@@ -115,9 +116,10 @@ async def run_grok(extra):
         log.warning("grok rc=%s err=%s", p.returncode, err.decode()[-400:])
         return "Sorry, I couldn't reach Grok right now."
     # drop pre-tool narration like "I'll have a look ..., sir." glued to the real answer
+    tag = "".join(m.group(0) for m in EMO_RE.finditer(reply))[:24]; reply = EMO_RE.sub("", reply).strip()
     parts = re.split(r"(?<=[.!?])(?=[A-Z])|\n+", reply)
     while len(parts) > 1 and re.match(r"\s*(I'll|I will|Let me|One moment|Allow me|Checking|Give me)\b", parts[0], re.I): parts.pop(0)
-    return " ".join(x.strip() for x in parts if x.strip())
+    return (tag + " " + " ".join(x.strip() for x in parts if x.strip())).strip()
 
 def now_str():
     from datetime import datetime; from zoneinfo import ZoneInfo
@@ -263,9 +265,10 @@ async def _warm_up():
         except Exception as e: log.warning("warm grok start failed: %s", e)
 
 def strip_narration(reply):
+    tag = "".join(m.group(0) for m in EMO_RE.finditer(reply))[:24]; reply = EMO_RE.sub("", reply).strip()
     parts = re.split(r"(?<=[.!?])(?=[A-Z])|\n+", reply)
     while len(parts) > 1 and re.match(r"\s*(I'll|I will|Let me|One moment|Allow me|Checking|Give me)\b", parts[0], re.I): parts.pop(0)
-    return " ".join(x.strip() for x in parts if x.strip())
+    return (tag + " " + " ".join(x.strip() for x in parts if x.strip())).strip()
 
 async def ask_grok(text):
     r = memory_command(text)
@@ -508,7 +511,21 @@ async def weather_card():
 POSTS_TAG = re.compile(r"\[POSTS:\s*(.+?)\]\s*$", re.I | re.S)
 SHOW_TAG = re.compile(r"\[SHOW:\s*([^\]]+)\]", re.I)
 SHOW_REQ = re.compile(r"\bwhat (?:does|do) (?:an? |the )?(.+?) look like|\b(?:show me|can you show me|let me see|display)\s+(?:an? |the |some )?(?:(?:picture|photo|image|pic)s? of\s+)?(?:an? |the |some )?(.+?)[?.!]*$|\b(?:picture|photo|image|pic) of\s+(?:an? |the |some )?(.+?)[?.!]*$", re.I)
+EMO_RE = re.compile(r"\[\s*EMO\s*:\s*(\w+)\s*\]", re.I)
+EMOS = {"happy", "sad", "mad", "laughing", "crying", "surprised", "smug", "neutral"}
+LAST_EMO = {}
+
+def take_emotion(reply):
+    """Strips [EMO:x] tags from the spoken text; returns (clean_reply, emotion)."""
+    m = EMO_RE.search(reply or ""); e = m.group(1).lower() if m else "neutral"
+    return re.sub(r"\s{2,}", " ", EMO_RE.sub("", reply or "")).strip(), (e if e in EMOS else "neutral")
+
 async def respond(text):
+    reply, image, caption = await _respond(text)
+    reply, LAST_EMO["e"] = take_emotion(reply)
+    return reply, image, caption
+
+async def _respond(text):
     """Returns (spoken_reply, image_url, caption). A requested sound effect is left in LAST_SFX['q']."""
     LAST_SFX.clear()
     m = SFX_REQ.search(text)
@@ -562,7 +579,7 @@ async def pipeline(data, fmt, stream=False):
         audio, ctype, engine = await tts(reply, fmt)
     t3 = time.time()
     if not text: image = None; caption = ""
-    timing = {"sfx": sq if fx else None, "image": image, "caption": caption, "stt_ms": int((t1-t0)*1000), "llm_ms": int((t2-t1)*1000), "tts_ms": int((t3-t2)*1000), "total_ms": int((t3-t0)*1000)}
+    timing = {"emotion": LAST_EMO.get("e", "neutral") if text else "neutral", "sfx": sq if fx else None, "image": image, "caption": caption, "stt_ms": int((t1-t0)*1000), "llm_ms": int((t2-t1)*1000), "tts_ms": int((t3-t2)*1000), "total_ms": int((t3-t0)*1000)}
     log.info("talk %s | %r -> %r", timing, text, reply)
     return text, reply, audio, ctype, engine, timing
 
@@ -576,6 +593,7 @@ async def talk(request: Request, format: str = Query("mp3"), stream: int = Query
         h["X-Audio-URL"] = f"{PUBLIC or str(request.base_url).rstrip('/')}/audio/{engine.split(':')[1]}"; engine = "elevenlabs-stream"
     h |= {"X-Transcript-B64": b64(text), "X-Reply-B64": b64(reply), "X-TTS-Engine": engine, "X-Timing": json.dumps(t)}
     if t.get("action"): h["X-Action"] = t["action"]
+    h["X-Emotion"] = t.get("emotion") or "neutral"
     if t.get("image") or t.get("caption"): h["X-Image"] = t.get("image") or ""; h["X-Caption-B64"] = b64(t.get("caption", ""))
     return Response(audio, media_type=ctype, headers=h)
 
@@ -604,7 +622,7 @@ async def text_turn(q: str = Query(...)):
     async with lock:
         reply, image, caption = await respond(q); history.append((q, reply + (f" [showed picture: {caption}]" if image else (" [showed X posts]" if caption else "")))); save_hist()
     sq = LAST_SFX.get("q"); t1 = time.time(); fx = await sound_effect(sq) if sq else None
-    return {"reply": reply, "image": image, "caption": caption, "sfx": sq if fx else None,
+    return {"reply": reply, "emotion": LAST_EMO.get("e", "neutral"), "image": image, "caption": caption, "sfx": sq if fx else None,
             "sfx_url": f"{PUBLIC}/sfx/{sfx_key(sq)}.mp3" if fx else None, "llm_ms": int((t1-t0)*1000), "sfx_ms": int((time.time()-t1)*1000)}
 
 @app.get("/memory")
