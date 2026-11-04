@@ -20,6 +20,9 @@ PREAMBLE = (f"You are JARVIS, {WHO}'s AI butler, in the spirit of Jarvis from Ir
             "Use web search only for live facts like weather, news or scores; answer general knowledge, maths, chit-chat and the time directly without any tools, it is much faster. "
             "You have a screen. Whenever the user asks about or mentions an animal, place, landmark, famous person, object or what something looks like, "
             "append a tag at the very end like [SHOW: giraffe] with a short Wikipedia-style search query; the device will display it. "
+            "For maths, calculations, conversions, definitions, lists or any non-visual answer, never use [SHOW]; when the user asks to see it (e.g. 'show me', 'can you show me', 'show the work') or the working is multi-step, "
+            "append [CARD: title || step || step || result] instead, e.g. [CARD: 20 × 20 || 20 × 20 = 400] or [CARD: 15% of 80 || 15% = 0.15 || 0.15 × 80 = 12 || = 12]; use proper symbols like ×, ÷, −, √; the device renders it as a clean card. "
+            "A follow-up like 'show me', 'show it' or 'can you show me' refers to your previous answer: show a [CARD] for non-visual topics, and use [SHOW] only if the previous topic was a visual thing (animal, place, person, object). "
             "Never use [SHOW] for weather; the device shows its own forecast card for weather questions. Never say you cannot show images. "
             "Always begin your reply with one emotion tag for your face on screen: [EMO:happy], [EMO:sad], [EMO:mad], [EMO:laughing], [EMO:crying], [EMO:surprised], [EMO:smug] or [EMO:neutral]; pick the one that fits your reply. "
             "For anything about X/Twitter (trending, latest posts, what people are saying), use your X search tool, then summarise the gist in one or two spoken sentences without reading handles aloud, "
@@ -463,12 +466,19 @@ def _wx_icon(d, code, cx, cy, s, day=True):
     elif 71 <= code <= 77 or code in (85, 86):
         for i in range(3): x = cx-0.3*s+i*0.3*s; d.ellipse([x-0.06*s, cy+0.42*s, x+0.06*s, cy+0.54*s], fill=(240, 245, 255))
     elif code >= 95: d.polygon([(cx+0.05*s, cy+0.2*s), (cx-0.15*s, cy+0.5*s), (cx, cy+0.5*s), (cx-0.1*s, cy+0.75*s), (cx+0.2*s, cy+0.4*s), (cx+0.05*s, cy+0.4*s)], fill=sun)
+_FONTS = {}
+def _font(n):
+    from PIL import ImageFont
+    if n not in _FONTS:
+        f = next((x for x in (os.path.join(BASE, "fonts", "DejaVuSans.ttf"), "/app/fonts/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf") if os.path.exists(x)), None)
+        _FONTS[n] = ImageFont.truetype(f, int(n*0.92)) if f else ImageFont.load_default(n)
+    return _FONTS[n]
 def render_weather(j):
     from PIL import Image, ImageDraw, ImageFont
     import datetime
-    W, H = 960, 424
+    W, H = 960, 440
     im = Image.new("RGB", (W, H), (11, 15, 20)); d = ImageDraw.Draw(im)  # same as the app card background
-    F = lambda n: ImageFont.load_default(n)
+    F = _font
     acc = (0, 229, 255); gr = (144, 164, 174); wh = (255, 255, 255)
     cu, hr, dy = j["current"], j["hourly"], j["daily"]
     d.rounded_rectangle([12, 10, W-12, 238], 16, fill=(15, 23, 31), outline=(0, 78, 90), width=1)
@@ -526,6 +536,121 @@ BANNED_IMG = re.compile(r"\bfrogs?\b|\btoads?\b", re.I)
 def wx_elsewhere(text):
     return [m.group(0) for m in WX_ELSEWHERE.finditer(text) if not any(w.lower() in m.group(0).lower() for w in HOME_PLACE.replace(',', ' ').split() if len(w) > 2)]
 SHOW_TAG = re.compile(r"\[SHOW:\s*([^\]]+)\]", re.I)
+CARD_TAG = re.compile(r"\[CARD:\s*([^\]]+)\]", re.I)
+VAGUE_Q = re.compile(r"^(?:it|that|this|them|those|these|me|us|how|again|the (?:work|working|math|maths|answer|result|steps|problem|calculation|sum)|your (?:work|working|answer)|(?:how|what) (?:you|it) (?:did|got|means?)(?: it| that)?|on (?:the )?screen)?\b.*$", re.I)
+FOLLOW_SHOW = re.compile(r"^\W*(?:(?:can|could|would) you |please |jarvis,? )*(?:show|display|put)(?: me| us)?(?: (?:it|that|this|them|the (?:work|working|math|maths|answer|result|steps|problem|calculation|sum)|your work(?:ing)?|how(?: you (?:did|got) (?:it|that))?))?(?: on (?:the )?screen)?(?: please)?\W*$", re.I)
+def render_card(title, lines):
+    """Server-rendered text/maths card in the same style as the weather card."""
+    from PIL import Image, ImageDraw, ImageFont
+    import textwrap
+    W, H = 960, 440
+    im = Image.new("RGB", (W, H), (11, 15, 20)); d = ImageDraw.Draw(im)
+    F = _font
+    acc = (0, 229, 255); gr = (144, 164, 174); wh = (255, 255, 255)
+    d.rounded_rectangle([12, 10, W-12, H-10], 16, fill=(15, 23, 31), outline=(0, 78, 90), width=1)
+    d.text((40, 30), title[:60], font=F(30), fill=acc)
+    d.line([40, 78, W-40, 78], fill=(0, 60, 70), width=1)
+    lines = [l for l in lines if l][:6] or [title]
+    res, steps = lines[-1], lines[:-1]
+    y, fs = 98, (30 if len(steps) <= 3 else 24)
+    for l in steps:
+        for w in textwrap.wrap(l, 52)[:2]:
+            d.text((56, y), w, font=F(fs), fill=gr); y += fs + 12
+    big = 84 if len(res) <= 16 else (60 if len(res) <= 24 else 40)
+    while big > 28 and d.textlength(res, font=F(big)) > W-100: big -= 4
+    ry = max(y + 10, (H + y) // 2 - big // 2 - 10) if steps else (H - big) // 2 + 20
+    d.text((W//2, min(ry, H - big - 40) + big//2), res, font=F(big), fill=wh, anchor="mm")
+    name = f"card_{int(time.time()*1000)}.png"; im.save(os.path.join(IMG_DIR, name))
+    olds = sorted(f for f in os.listdir(IMG_DIR) if f.startswith("card_"))
+    for old in olds[:-20]:
+        try: os.remove(os.path.join(IMG_DIR, old))
+        except Exception: pass
+    return name
+def render_doc(title, sub, paras, foot):
+    """Scripture / dictionary card: title, accent subtitle, wrapped paragraphs, footer label."""
+    from PIL import Image, ImageDraw, ImageFont
+    W, H = 960, 440
+    im = Image.new("RGB", (W, H), (11, 15, 20)); d = ImageDraw.Draw(im)
+    F = _font
+    acc = (0, 229, 255); gr = (144, 164, 174); wh = (255, 255, 255)
+    d.rounded_rectangle([12, 10, W-12, H-10], 16, fill=(15, 23, 31), outline=(0, 78, 90), width=1)
+    d.text((40, 24), title[:44], font=F(40), fill=wh)
+    if sub: d.text((W-40, 36), sub[:40], font=F(22), fill=acc, anchor="ra")
+    d.line([40, 80, W-40, 80], fill=(0, 60, 70), width=1)
+    def wrap(t, f, maxw):
+        out, cur = [], ""
+        for w in t.split():
+            n = (cur + " " + w).strip()
+            if d.textlength(n, font=f) > maxw and cur: out.append(cur); cur = w
+            else: cur = n
+        if cur: out.append(cur)
+        return out
+    fs = 30
+    while True:
+        f = F(fs); rows = []
+        for i, (txt, col) in enumerate(paras):
+            rows += [(r, col) for r in wrap(txt, f, W-100)] + [("", col)]
+        if len(rows) * (fs + 8) <= H - 160 or fs <= 18: break
+        fs -= 2
+    maxr = (H - 160) // (fs + 8); cut = len(rows) > maxr; rows = rows[:maxr]
+    if cut and rows: rows[-1] = (rows[-1][0].rstrip(" .,;") + " …", rows[-1][1])
+    y = 98
+    for r, col in rows: d.text((50, y), r, font=f, fill=col); y += fs + 8
+    d.text((40, H-46), foot[:80], font=F(18), fill=gr)
+    name = f"card_{int(time.time()*1000)}.png"; im.save(os.path.join(IMG_DIR, name)); return name
+BIBLE_BOOKS = r"(?:[123] ?)?(?:genesis|exodus|leviticus|numbers|deuteronomy|joshua|judges|ruth|samuel|kings|chronicles|ezra|nehemiah|esther|job|psalms?|proverbs|ecclesiastes|song of (?:songs|solomon)|isaiah|jeremiah|lamentations|ezekiel|daniel|hosea|joel|amos|obadiah|jonah|micah|nahum|habakkuk|zephaniah|haggai|zechariah|malachi|matthew|mark|luke|john|acts|romans|corinthians|galatians|ephesians|philippians|colossians|thessalonians|timothy|titus|philemon|hebrews|james|peter|jude|revelations?)"
+NUMW = {"first": "1", "second": "2", "third": "3", "one": "1", "two": "2", "three": "3"}
+BIBLE_RE = re.compile(r"\b((?:(?:first|second|third|1st|2nd|3rd|one|two|three|[123]) ?)?" + BIBLE_BOOKS.split(" ?)?", 1)[1] + ")" + r"\s+(\d+)(?:\s*(?::|verse|verses|v\.?)\s*(\d+)(?:\s*(?:-|to|through)\s*(\d+))?)?", re.I)
+async def bible_card(text):
+    m = BIBLE_RE.search(text.replace(" chapter ", " "))
+    if not m: return None
+    book = m.group(1).rsplit(None, 0)[0]
+    book = re.sub(r"\s+\d+.*$", "", m.group(0)).strip()
+    w = book.split()
+    if w[0].lower() in NUMW: w[0] = NUMW[w[0].lower()]
+    w[0] = re.sub(r"(st|nd|rd)$", "", w[0]); book = " ".join(w)
+    if re.match(r"revelations", book, re.I): book = "Revelation"
+    if re.match(r"psalms?$", book, re.I): book = "Psalm"
+    ch, v1, v2 = m.group(2), m.group(3), m.group(4)
+    ref = f"{book} {ch}" + (f":{v1}" + (f"-{v2}" if v2 else "") if v1 else "")
+    async with httpx.AsyncClient(timeout=10) as c:
+        r = await c.get("https://bible-api.com/" + ref.replace(" ", "+"), params={"translation": "kjv"})
+    if r.status_code != 200: return None
+    j = r.json(); vs = j.get("verses") or []
+    if not vs: return None
+    full = " ".join(f"{v['verse']} {v['text'].strip()}" for v in vs) if len(vs) > 1 else vs[0]["text"].strip()
+    full = re.sub(r"\s+", " ", full)
+    name = await asyncio.to_thread(render_doc, j.get("reference", ref), "King James Version", [(full, (255, 255, 255))], "KJV · public domain · bible-api.com" + (f" · {len(vs)} verses" if len(vs) > 1 else ""))
+    plain = re.sub(r"\s+", " ", " ".join(v["text"].strip() for v in vs[:3]))
+    spoken = f"{j.get('reference', ref)}. {plain}" + (" The rest is on screen, sir." if len(vs) > 3 else "")
+    return "[EMO:neutral] " + spoken, f"{PUBLIC}/img/{name}", j.get("reference", ref)
+DEFINE_RE = re.compile(r"^\W*(?:(?:jarvis,?|hey jarvis,?|please|can you|could you)\s+)*(?:define|definition of|what(?:'s| is) the (?:definition|meaning) of|what does (?:the word )?['\"]?([a-z\-]+)['\"]? mean|meaning of)\s*(?:the word\s+)?['\"]?([a-z\-]+)?['\"]?\W*$", re.I)
+async def define_card(text):
+    m = DEFINE_RE.search(text.strip())
+    if not m: return None
+    word = (m.group(1) or m.group(2) or "").lower()
+    if not word or word in ("it", "that", "this"): return None
+    async with httpx.AsyncClient(timeout=10) as c:
+        r = await c.get(f"https://api.dictionaryapi.dev/api/v2/entries/en/{word}")
+    if r.status_code != 200: return None
+    e = r.json()[0]
+    pron = e.get("phonetic") or next((p.get("text") for p in e.get("phonetics", []) if p.get("text")), "")
+    paras, first, ex = [], None, None
+    for mn in e.get("meanings", [])[:2]:
+        for k, df in enumerate(mn.get("definitions", [])[:2]):
+            if len(paras) >= 3: break
+            paras.append((f"{mn['partOfSpeech']} — {df['definition']}" if k == 0 else f"   {df['definition']}", (255, 255, 255)))
+            first = first or (mn["partOfSpeech"], df["definition"]); ex = ex or df.get("example")
+    if not paras: return None
+    if ex: paras.append((f"“{ex}”", (144, 164, 174)))
+    name = await asyncio.to_thread(render_doc, e.get("word", word), pron, paras, "Dictionary · dictionaryapi.dev (Wiktionary)")
+    return f"[EMO:neutral] {word.capitalize()}, as a {first[0]}: {first[1]}", f"{PUBLIC}/img/{name}", word.capitalize()
+async def card_from(body):
+    parts = [x.strip() for x in body.split("||") if x.strip()]
+    if not parts: return None, ""
+    title = parts[0]; lines = parts[1:] or parts[:1]
+    name = await asyncio.to_thread(render_card, title, lines)
+    return f"{PUBLIC}/img/{name}", title
 SHOW_REQ = re.compile(r"\bwhat (?:does|do) (?:an? |the )?(.+?) look like|\b(?:show me|can you show me|let me see|display)\s+(?:an? |the |some )?(?:(?:picture|photo|image|pic)s? of\s+)?(?:an? |the |some )?(.+?)[?.!]*$|\b(?:picture|photo|image|pic) of\s+(?:an? |the |some )?(.+?)[?.!]*$", re.I)
 EMO_RE = re.compile(r"\[\s*EMO\s*:\s*(\w+)\s*\]", re.I)
 EMOS = {"happy", "sad", "mad", "laughing", "crying", "surprised", "smug", "neutral"}
@@ -553,9 +678,16 @@ async def _respond(text):
     if HOME_LATLON and WX_SHOW.search(text) and not wx_elsewhere(text):
         try: return await weather_card()
         except Exception as e: log.warning("weather card: %s", e)
+    for fn in (bible_card, define_card):
+        try:
+            got = await fn(text)
+            if got: return got
+        except Exception as e: log.warning("%s: %s", fn.__name__, e)
     _else = wx_elsewhere(text)
     wx_q = bool(HOME_LATLON and WX_ASK.search(text) and not _else)
-    m = None if WHY_SHOW.search(text) else SHOW_REQ.search(text)
+    follow = bool(FOLLOW_SHOW.search(text))
+    m = None if (WHY_SHOW.search(text) or follow) else SHOW_REQ.search(text)
+    if m and not wx_q and VAGUE_Q.match(next((g for g in m.groups() if g), "").strip()) and len(next((g for g in m.groups() if g), "").split()) <= 4 and re.match(r"(it|that|this|them|those|these|me|us|how|again|the |your |on )", next((g for g in m.groups() if g), "").strip(), re.I): m = None; follow = True
     if m and not wx_q:
         q = next((g for g in m.groups() if g), "").strip()
         if q and not re.search(r"\b(weather|forecast|news|time)\b", q, re.I):
@@ -563,7 +695,13 @@ async def _respond(text):
             reply = f"Here's {'an' if q[0].lower() in 'aeiou' else 'a'} {q}, sir." if u else f"I'm afraid I couldn't find a picture of {q}, sir."
             if not re.search(r"^(an? |the )", q) and q.endswith("s"): reply = f"Here are some {q}, sir." if u else reply
             return reply, u, q.capitalize()
-    raw = await ask_grok(text)
+    raw = await ask_grok(text + (" (Follow-up: show your previous answer on screen. Use [CARD: ...] unless the previous topic was a visual thing.)" if follow else ""))
+    cm = CARD_TAG.search(raw); raw = CARD_TAG.sub("", raw).strip()
+    if cm:
+        try:
+            u, title = await card_from(cm.group(1))
+            if u: return SHOW_TAG.sub("", POSTS_TAG.sub("", SFX_TAG.sub("", raw))).strip(), u, title
+        except Exception as e: log.warning("card: %s", e)
     sm = SFX_TAG.search(raw)
     if sm: LAST_SFX["q"] = sm.group(1).strip(); raw = SFX_TAG.sub("", raw).strip()
     pm = POSTS_TAG.search(raw); raw = POSTS_TAG.sub("", raw)
